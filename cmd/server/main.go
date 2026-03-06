@@ -1,0 +1,184 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lamro-artsuew/wallet-engine/internal/adapter/messaging"
+	"github.com/lamro-artsuew/wallet-engine/internal/adapter/repository"
+	"github.com/lamro-artsuew/wallet-engine/internal/config"
+	handler "github.com/lamro-artsuew/wallet-engine/internal/port/http"
+	"github.com/lamro-artsuew/wallet-engine/internal/service"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+)
+
+func main() {
+	// Structured logging
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	if os.Getenv("ENV") != "production" {
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	}
+
+	cfg := config.Load()
+	log.Info().
+		Int("port", cfg.Server.Port).
+		Int("metrics_port", cfg.Server.MetricsPort).
+		Int("chains", len(cfg.Chains)).
+		Msg("starting wallet-engine")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Database connection pool
+	poolCfg, err := pgxpool.ParseConfig(cfg.Database.URL)
+	if err != nil {
+		log.Fatal().Err(err).Msg("invalid database URL")
+	}
+	poolCfg.MaxConns = int32(cfg.Database.MaxOpenConns)
+	poolCfg.MinConns = int32(cfg.Database.MaxIdleConns)
+	poolCfg.MaxConnLifetime = cfg.Database.ConnMaxLifetime
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		log.Fatal().Err(err).Msg("failed to connect to database")
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatal().Err(err).Msg("database ping failed")
+	}
+	log.Info().Msg("database connected")
+
+	// Run migrations
+	if err := runMigrations(ctx, pool); err != nil {
+		log.Fatal().Err(err).Msg("migrations failed")
+	}
+
+	// Repositories
+	depositRepo := repository.NewDepositRepo(pool)
+	addrRepo := repository.NewDepositAddressRepo(pool)
+	walletRepo := repository.NewWalletRepo(pool)
+	indexRepo := repository.NewChainIndexRepo(pool)
+	hdRepo := repository.NewHDDerivationRepo(pool)
+
+	// Redpanda producer (non-fatal if unavailable)
+	var producer *messaging.RedpandaProducer
+	producer, err = messaging.NewRedpandaProducer(cfg.Redpanda.Brokers)
+	if err != nil {
+		log.Warn().Err(err).Msg("redpanda producer unavailable, events will not be published")
+	}
+
+	// Master seed for HD derivation
+	// In production: fetch from Vault at vault:secret/wallet-engine/master-seed
+	masterSeed := []byte(envStr("MASTER_SEED", "DEVELOPMENT-SEED-DO-NOT-USE-IN-PRODUCTION"))
+	addrSvc := service.NewAddressService(addrRepo, hdRepo, masterSeed)
+
+	// Deposit indexer
+	indexer := service.NewDepositIndexer(cfg.Chains, depositRepo, addrRepo, indexRepo, producer)
+	if err := indexer.Start(ctx); err != nil {
+		log.Fatal().Err(err).Msg("failed to start deposit indexer")
+	}
+	defer indexer.Stop()
+
+	// HTTP server
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(requestLogger())
+
+	h := handler.NewHandler(depositRepo, addrRepo, walletRepo, indexer, addrSvc)
+	h.RegisterRoutes(r)
+
+	srv := &http.Server{
+		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:      r,
+		ReadTimeout:  cfg.Server.ReadTimeout,
+		WriteTimeout: cfg.Server.WriteTimeout,
+	}
+
+	// Metrics server (separate port)
+	metricsSrv := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.Server.MetricsPort),
+		Handler: promhttp.Handler(),
+	}
+
+	go func() {
+		log.Info().Int("port", cfg.Server.MetricsPort).Msg("metrics server starting")
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("metrics server failed")
+		}
+	}()
+
+	go func() {
+		log.Info().Int("port", cfg.Server.Port).Msg("API server starting")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("API server failed")
+		}
+	}()
+
+	// Graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Info().Msg("shutting down...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
+
+	indexer.Stop()
+	srv.Shutdown(shutdownCtx)
+	metricsSrv.Shutdown(shutdownCtx)
+	if producer != nil {
+		producer.Close()
+	}
+
+	log.Info().Msg("wallet-engine stopped")
+}
+
+func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	migrationSQL, err := os.ReadFile("migrations/001_foundation.sql")
+	if err != nil {
+		// Try alternate path for containerized deployment
+		migrationSQL, err = os.ReadFile("/app/migrations/001_foundation.sql")
+		if err != nil {
+			log.Warn().Msg("migration file not found, skipping migrations")
+			return nil
+		}
+	}
+
+	_, err = pool.Exec(ctx, string(migrationSQL))
+	if err != nil {
+		return fmt.Errorf("execute migration: %w", err)
+	}
+	log.Info().Msg("migrations applied")
+	return nil
+}
+
+func requestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		log.Info().
+			Str("method", c.Request.Method).
+			Str("path", c.Request.URL.Path).
+			Int("status", c.Writer.Status()).
+			Dur("latency", time.Since(start)).
+			Msg("request")
+	}
+}
+
+func envStr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}

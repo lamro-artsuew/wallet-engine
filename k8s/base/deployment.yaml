@@ -1,0 +1,157 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wallet-engine
+  namespace: wallet-engine
+  labels:
+    app: wallet-engine
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: wallet-engine
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: wallet-engine
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: wallet-engine
+      imagePullSecrets:
+        - name: harbor-registry
+      containers:
+        - name: wallet-engine
+          image: harbor.157.180.105.202.nip.io/osonx/wallet-engine:latest
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: ENV
+              value: "production"
+            - name: PORT
+              value: "8080"
+            - name: METRICS_PORT
+              value: "9090"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: wallet-engine-secrets
+                  key: database-url
+            - name: MASTER_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: wallet-engine-secrets
+                  key: master-seed
+            - name: REDPANDA_BROKERS
+              value: "redpanda.blockchain.svc:9092"
+            - name: ETH_RPC_URL
+              value: "http://erigon-eth.blockchain.svc:8545"
+            - name: BSC_RPC_URL
+              value: "http://erigon-bsc.blockchain.svc:8545"
+            - name: POLYGON_RPC_URL
+              value: "http://erigon-polygon.blockchain.svc:8545"
+            - name: ARBITRUM_RPC_URL
+              value: "http://arbitrum.blockchain.svc:8547"
+            - name: OPTIMISM_RPC_URL
+              value: "http://optimism.blockchain.svc:8545"
+            - name: AVALANCHE_RPC_URL
+              value: "http://avalanche.blockchain.svc:9650/ext/bc/C/rpc"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wallet-engine
+  namespace: wallet-engine
+  labels:
+    app: wallet-engine
+spec:
+  selector:
+    app: wallet-engine
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wallet-engine
+  namespace: wallet-engine
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wallet-engine
+  namespace: wallet-engine
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - wallet-engine.157.180.105.202.nip.io
+      secretName: wallet-engine-tls
+  rules:
+    - host: wallet-engine.157.180.105.202.nip.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: wallet-engine
+                port:
+                  number: 8080
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: wallet-engine
+  namespace: wallet-engine
+  labels:
+    app: wallet-engine
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: wallet-engine
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics

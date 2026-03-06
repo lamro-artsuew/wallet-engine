@@ -1,0 +1,393 @@
+package service
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/google/uuid"
+	"github.com/lamro-artsuew/wallet-engine/internal/adapter/chain"
+	"github.com/lamro-artsuew/wallet-engine/internal/adapter/messaging"
+	"github.com/lamro-artsuew/wallet-engine/internal/adapter/repository"
+	"github.com/lamro-artsuew/wallet-engine/internal/config"
+	"github.com/lamro-artsuew/wallet-engine/internal/domain"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+)
+
+var (
+	blocksProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "wallet_engine_blocks_processed_total",
+		Help: "Total blocks processed per chain",
+	}, []string{"chain"})
+
+	depositsDetected = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "wallet_engine_deposits_detected_total",
+		Help: "Total deposits detected per chain",
+	}, []string{"chain", "token"})
+
+	indexerLag = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "wallet_engine_indexer_lag_blocks",
+		Help: "Number of blocks behind chain tip",
+	}, []string{"chain"})
+
+	indexerErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "wallet_engine_indexer_errors_total",
+		Help: "Indexer errors per chain",
+	}, []string{"chain", "error_type"})
+
+	scanDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "wallet_engine_block_scan_duration_seconds",
+		Help:    "Time to scan a block for transfers",
+		Buckets: prometheus.ExponentialBuckets(0.01, 2, 10),
+	}, []string{"chain"})
+)
+
+// DepositIndexer runs per-chain goroutines to detect inbound transfers
+type DepositIndexer struct {
+	chains      map[string]*chainIndexer
+	depositRepo *repository.DepositRepo
+	addrRepo    *repository.DepositAddressRepo
+	indexRepo   *repository.ChainIndexRepo
+	producer    *messaging.RedpandaProducer
+	mu          sync.RWMutex
+	cancel      context.CancelFunc
+}
+
+type chainIndexer struct {
+	adapter       *chain.EVMAdapter
+	cfg           config.ChainConfig
+	logger        zerolog.Logger
+	watchAddrs    map[common.Address]*domain.DepositAddress
+	watchAddrsMu  sync.RWMutex
+}
+
+// NewDepositIndexer creates a new deposit indexer
+func NewDepositIndexer(
+	chainConfigs []config.ChainConfig,
+	depositRepo *repository.DepositRepo,
+	addrRepo *repository.DepositAddressRepo,
+	indexRepo *repository.ChainIndexRepo,
+	producer *messaging.RedpandaProducer,
+) *DepositIndexer {
+	chains := make(map[string]*chainIndexer, len(chainConfigs))
+	for _, cfg := range chainConfigs {
+		if !cfg.Enabled {
+			continue
+		}
+		adapter := chain.NewEVMAdapter(cfg.Name, cfg.ChainID, cfg.RPCURL, cfg.TrackedTokens)
+		chains[cfg.Name] = &chainIndexer{
+			adapter:    adapter,
+			cfg:        cfg,
+			logger:     log.With().Str("chain", cfg.Name).Logger(),
+			watchAddrs: make(map[common.Address]*domain.DepositAddress),
+		}
+	}
+
+	return &DepositIndexer{
+		chains:      chains,
+		depositRepo: depositRepo,
+		addrRepo:    addrRepo,
+		indexRepo:   indexRepo,
+		producer:    producer,
+	}
+}
+
+// Start begins indexing all configured chains
+func (di *DepositIndexer) Start(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	di.cancel = cancel
+
+	for name, ci := range di.chains {
+		if err := ci.adapter.Connect(ctx); err != nil {
+			log.Error().Err(err).Str("chain", name).Msg("failed to connect, skipping chain")
+			continue
+		}
+
+		// Load existing deposit addresses into watch set
+		if err := di.refreshWatchAddresses(ctx, ci); err != nil {
+			log.Error().Err(err).Str("chain", name).Msg("failed to load watch addresses")
+		}
+
+		go di.runChainIndexer(ctx, ci)
+	}
+
+	return nil
+}
+
+// Stop halts all indexers
+func (di *DepositIndexer) Stop() {
+	if di.cancel != nil {
+		di.cancel()
+	}
+	for _, ci := range di.chains {
+		ci.adapter.Close()
+	}
+}
+
+// AddWatchAddress adds an address to the watch set for a chain
+func (di *DepositIndexer) AddWatchAddress(chain string, addr common.Address, da *domain.DepositAddress) {
+	if ci, ok := di.chains[chain]; ok {
+		ci.watchAddrsMu.Lock()
+		ci.watchAddrs[addr] = da
+		ci.watchAddrsMu.Unlock()
+	}
+}
+
+func (di *DepositIndexer) refreshWatchAddresses(ctx context.Context, ci *chainIndexer) error {
+	addrs, err := di.addrRepo.FindByChain(ctx, ci.cfg.Name)
+	if err != nil {
+		return err
+	}
+	ci.watchAddrsMu.Lock()
+	defer ci.watchAddrsMu.Unlock()
+	for _, a := range addrs {
+		ci.watchAddrs[common.HexToAddress(a.Address)] = a
+	}
+	ci.logger.Info().Int("addresses", len(ci.watchAddrs)).Msg("loaded watch addresses")
+	return nil
+}
+
+func (di *DepositIndexer) runChainIndexer(ctx context.Context, ci *chainIndexer) {
+	ci.logger.Info().Msg("starting chain indexer")
+
+	// Determine start block
+	startBlock := ci.cfg.StartBlock
+	state, err := di.indexRepo.GetState(ctx, ci.cfg.Name)
+	if err == nil && state.LastBlockNumber > startBlock {
+		startBlock = state.LastBlockNumber + 1
+	}
+
+	pollInterval := time.Duration(ci.cfg.BlockTime) * time.Second
+	if pollInterval < 1*time.Second {
+		pollInterval = 1 * time.Second
+	}
+
+	currentBlock := startBlock
+	consecutiveErrors := 0
+	maxConsecutiveErrors := 10
+
+	for {
+		select {
+		case <-ctx.Done():
+			ci.logger.Info().Msg("chain indexer stopped")
+			return
+		default:
+		}
+
+		latestBlock, err := ci.adapter.LatestBlock(ctx)
+		if err != nil {
+			consecutiveErrors++
+			indexerErrors.WithLabelValues(ci.cfg.Name, "rpc_latest_block").Inc()
+			ci.logger.Error().Err(err).Int("consecutive", consecutiveErrors).Msg("failed to get latest block")
+
+			if consecutiveErrors >= maxConsecutiveErrors {
+				ci.logger.Error().Msg("too many consecutive errors, backing off")
+				select {
+				case <-time.After(30 * time.Second):
+				case <-ctx.Done():
+					return
+				}
+				consecutiveErrors = 0
+			}
+			continue
+		}
+		consecutiveErrors = 0
+
+		// Calculate lag
+		if int64(latestBlock) > currentBlock {
+			indexerLag.WithLabelValues(ci.cfg.Name).Set(float64(int64(latestBlock) - currentBlock))
+		}
+
+		// Process blocks up to (latest - confirmations) for safety
+		safeBlock := int64(latestBlock) - int64(ci.cfg.Confirmations)
+		if safeBlock < 0 {
+			safeBlock = 0
+		}
+
+		for currentBlock <= safeBlock {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			if err := di.processBlock(ctx, ci, uint64(currentBlock)); err != nil {
+				indexerErrors.WithLabelValues(ci.cfg.Name, "process_block").Inc()
+				ci.logger.Error().Err(err).Int64("block", currentBlock).Msg("failed to process block")
+				// Back off on error but don't skip the block
+				time.Sleep(2 * time.Second)
+				break
+			}
+
+			blocksProcessed.WithLabelValues(ci.cfg.Name).Inc()
+			currentBlock++
+		}
+
+		// Also update confirmation counts for pending deposits
+		di.updateConfirmations(ctx, ci, int64(latestBlock))
+
+		// Wait for new blocks
+		select {
+		case <-time.After(pollInterval):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, blockNum uint64) error {
+	start := time.Now()
+	defer func() {
+		scanDuration.WithLabelValues(ci.cfg.Name).Observe(time.Since(start).Seconds())
+	}()
+
+	// Build current watch set
+	ci.watchAddrsMu.RLock()
+	watchSet := make(map[common.Address]bool, len(ci.watchAddrs))
+	for addr := range ci.watchAddrs {
+		watchSet[addr] = true
+	}
+	ci.watchAddrsMu.RUnlock()
+
+	if len(watchSet) == 0 {
+		// No addresses to watch, just update cursor
+		blockHash, err := ci.adapter.GetBlockHash(ctx, blockNum)
+		if err != nil {
+			return err
+		}
+		return di.indexRepo.UpsertState(ctx, ci.cfg.Name, int64(blockNum), blockHash.Hex())
+	}
+
+	// Scan block for ERC-20 transfers to our addresses
+	events, err := ci.adapter.ScanBlockForTransfers(ctx, blockNum, watchSet)
+	if err != nil {
+		return fmt.Errorf("scan block %d: %w", blockNum, err)
+	}
+
+	// Process detected transfers
+	for _, evt := range events {
+		ci.watchAddrsMu.RLock()
+		da := ci.watchAddrs[evt.To]
+		ci.watchAddrsMu.RUnlock()
+
+		if da == nil {
+			continue
+		}
+
+		deposit := &domain.Deposit{
+			ID:               uuid.New(),
+			IdempotencyKey:   fmt.Sprintf("%s:%s:%d", ci.cfg.Name, evt.TxHash.Hex(), evt.LogIndex),
+			Chain:            ci.cfg.Name,
+			TxHash:           evt.TxHash.Hex(),
+			LogIndex:         int(evt.LogIndex),
+			BlockNumber:      int64(evt.BlockNumber),
+			BlockHash:        evt.BlockHash.Hex(),
+			FromAddress:      evt.From.Hex(),
+			ToAddress:        evt.To.Hex(),
+			TokenAddress:     evt.TokenAddress.Hex(),
+			TokenSymbol:      ci.adapter.GetTokenSymbol(evt.TokenAddress),
+			Amount:           evt.Amount,
+			Decimals:         18, // default for most ERC-20s
+			State:            domain.DepositDetected,
+			Confirmations:    0,
+			RequiredConfs:    ci.cfg.Confirmations,
+			DepositAddressID: da.ID,
+			WorkspaceID:      da.WorkspaceID,
+			UserID:           da.UserID,
+			DetectedAt:       time.Now(),
+		}
+
+		if err := di.depositRepo.Upsert(ctx, deposit); err != nil {
+			ci.logger.Error().Err(err).
+				Str("tx", evt.TxHash.Hex()).
+				Str("to", evt.To.Hex()).
+				Msg("failed to record deposit")
+			continue
+		}
+
+		depositsDetected.WithLabelValues(ci.cfg.Name, deposit.TokenSymbol).Inc()
+
+		// Publish event to Redpanda
+		if di.producer != nil {
+			di.producer.PublishDeposit(ctx, deposit)
+		}
+
+		ci.logger.Info().
+			Str("tx", evt.TxHash.Hex()).
+			Str("from", evt.From.Hex()).
+			Str("to", evt.To.Hex()).
+			Str("token", deposit.TokenSymbol).
+			Str("amount", evt.Amount.String()).
+			Int64("block", int64(evt.BlockNumber)).
+			Msg("deposit detected")
+	}
+
+	// Update cursor
+	blockHash, err := ci.adapter.GetBlockHash(ctx, blockNum)
+	if err != nil {
+		return err
+	}
+	return di.indexRepo.UpsertState(ctx, ci.cfg.Name, int64(blockNum), blockHash.Hex())
+}
+
+// updateConfirmations updates confirmation count for pending deposits
+func (di *DepositIndexer) updateConfirmations(ctx context.Context, ci *chainIndexer, latestBlock int64) {
+	// Find deposits that are still confirming
+	for _, state := range []domain.DepositState{domain.DepositDetected, domain.DepositPending, domain.DepositConfirming} {
+		deposits, err := di.depositRepo.FindByChainAndState(ctx, ci.cfg.Name, state)
+		if err != nil {
+			ci.logger.Error().Err(err).Str("state", string(state)).Msg("failed to query pending deposits")
+			continue
+		}
+
+		for _, d := range deposits {
+			confs := int(latestBlock - d.BlockNumber)
+			if confs < 0 {
+				confs = 0
+			}
+
+			var newState domain.DepositState
+			switch {
+			case confs >= d.RequiredConfs:
+				newState = domain.DepositConfirmed
+			case confs > 0:
+				newState = domain.DepositConfirming
+			default:
+				newState = domain.DepositPending
+			}
+
+			if newState != d.State || confs != d.Confirmations {
+				if err := di.depositRepo.UpdateState(ctx, d.ID, newState, confs); err != nil {
+					ci.logger.Error().Err(err).Str("deposit", d.ID.String()).Msg("failed to update deposit state")
+				}
+			}
+		}
+	}
+}
+
+// GetChainHealth returns health info for each chain
+func (di *DepositIndexer) GetChainHealth(ctx context.Context) map[string]interface{} {
+	result := make(map[string]interface{})
+	for name, ci := range di.chains {
+		health := map[string]interface{}{
+			"connected": false,
+			"chain_id":  ci.cfg.ChainID,
+		}
+		if err := ci.adapter.Health(ctx); err == nil {
+			health["connected"] = true
+			if latest, err := ci.adapter.LatestBlock(ctx); err == nil {
+				health["latest_block"] = latest
+			}
+		}
+		if state, err := di.indexRepo.GetState(ctx, name); err == nil {
+			health["last_indexed_block"] = state.LastBlockNumber
+		}
+		result[name] = health
+	}
+	return result
+}
