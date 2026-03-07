@@ -28,18 +28,19 @@ func (r *DepositRepo) Upsert(ctx context.Context, d *domain.Deposit) error {
 			id, idempotency_key, chain, tx_hash, log_index, block_number, block_hash,
 			from_address, to_address, token_address, token_symbol, amount, decimals,
 			state, confirmations, required_confirmations, deposit_address_id,
-			workspace_id, user_id, detected_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+			workspace_id, user_id, detected_at, is_from_blacklisted
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
 		ON CONFLICT (idempotency_key) DO UPDATE SET
 			confirmations = EXCLUDED.confirmations,
 			state = EXCLUDED.state,
 			block_hash = EXCLUDED.block_hash,
+			is_from_blacklisted = deposits.is_from_blacklisted OR EXCLUDED.is_from_blacklisted,
 			updated_at = NOW()
 	`,
 		d.ID, d.IdempotencyKey, d.Chain, d.TxHash, d.LogIndex, d.BlockNumber, d.BlockHash,
 		d.FromAddress, d.ToAddress, d.TokenAddress, d.TokenSymbol, d.Amount.String(), d.Decimals,
 		string(d.State), d.Confirmations, d.RequiredConfs, d.DepositAddressID,
-		d.WorkspaceID, d.UserID, d.DetectedAt,
+		d.WorkspaceID, d.UserID, d.DetectedAt, d.IsFromBlacklisted,
 	)
 	return err
 }
@@ -67,7 +68,8 @@ func (r *DepositRepo) FindByChainAndState(ctx context.Context, chain string, sta
 		SELECT id, idempotency_key, chain, tx_hash, log_index, block_number, block_hash,
 			from_address, to_address, token_address, token_symbol, amount, decimals,
 			state, confirmations, required_confirmations, deposit_address_id,
-			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at
+			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at,
+			is_from_blacklisted
 		FROM deposits WHERE chain = $1 AND state = $2
 		ORDER BY block_number ASC
 	`, chain, string(state))
@@ -84,7 +86,8 @@ func (r *DepositRepo) FindByUser(ctx context.Context, userID uuid.UUID, limit, o
 		SELECT id, idempotency_key, chain, tx_hash, log_index, block_number, block_hash,
 			from_address, to_address, token_address, token_symbol, amount, decimals,
 			state, confirmations, required_confirmations, deposit_address_id,
-			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at
+			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at,
+			is_from_blacklisted
 		FROM deposits WHERE user_id = $1
 		ORDER BY created_at DESC LIMIT $2 OFFSET $3
 	`, userID, limit, offset)
@@ -101,7 +104,8 @@ func (r *DepositRepo) FindByWorkspace(ctx context.Context, workspaceID uuid.UUID
 		SELECT id, idempotency_key, chain, tx_hash, log_index, block_number, block_hash,
 			from_address, to_address, token_address, token_symbol, amount, decimals,
 			state, confirmations, required_confirmations, deposit_address_id,
-			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at
+			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at,
+			is_from_blacklisted
 		FROM deposits WHERE workspace_id = $1
 		ORDER BY created_at DESC LIMIT $2 OFFSET $3
 	`, workspaceID, limit, offset)
@@ -118,7 +122,8 @@ func (r *DepositRepo) FindByID(ctx context.Context, id uuid.UUID) (*domain.Depos
 		SELECT id, idempotency_key, chain, tx_hash, log_index, block_number, block_hash,
 			from_address, to_address, token_address, token_symbol, amount, decimals,
 			state, confirmations, required_confirmations, deposit_address_id,
-			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at
+			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at,
+			is_from_blacklisted
 		FROM deposits WHERE id = $1
 	`, id)
 	if err != nil {
@@ -146,6 +151,7 @@ func scanDeposits(rows pgx.Rows) ([]*domain.Deposit, error) {
 			&d.FromAddress, &d.ToAddress, &d.TokenAddress, &d.TokenSymbol, &amountStr, &d.Decimals,
 			&d.State, &d.Confirmations, &d.RequiredConfs, &d.DepositAddressID,
 			&d.WorkspaceID, &d.UserID, &d.DetectedAt, &confirmedAt, &sweptAt, &d.CreatedAt, &d.UpdatedAt,
+			&d.IsFromBlacklisted,
 		)
 		if err != nil {
 			return nil, err
@@ -299,6 +305,19 @@ func (r *WalletRepo) FindAll(ctx context.Context) ([]*domain.Wallet, error) {
 		wallets = append(wallets, w)
 	}
 	return wallets, rows.Err()
+}
+
+// FindByID returns a single wallet by ID
+func (r *WalletRepo) FindByID(ctx context.Context, id uuid.UUID) (*domain.Wallet, error) {
+	w := &domain.Wallet{}
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, chain, address, tier, label, encrypted_key, is_active, created_at, updated_at
+		FROM wallets WHERE id = $1
+	`, id).Scan(&w.ID, &w.Chain, &w.Address, &w.Tier, &w.Label, &w.EncryptedKey, &w.IsActive, &w.CreatedAt, &w.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("wallet %s not found", id)
+	}
+	return w, nil
 }
 
 // Create inserts a new wallet

@@ -23,6 +23,7 @@ type Wallet struct {
 	Address      string     `json:"address" db:"address"`
 	Tier         WalletTier `json:"tier" db:"tier"`
 	Label        string     `json:"label" db:"label"`
+	EncryptedKey *[]byte    `json:"-" db:"encrypted_key"`
 	IsActive     bool       `json:"is_active" db:"is_active"`
 	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at" db:"updated_at"`
@@ -75,6 +76,7 @@ type Deposit struct {
 	DepositAddressID uuid.UUID    `json:"deposit_address_id" db:"deposit_address_id"`
 	WorkspaceID      uuid.UUID    `json:"workspace_id" db:"workspace_id"`
 	UserID           uuid.UUID    `json:"user_id" db:"user_id"`
+	IsFromBlacklisted bool         `json:"is_from_blacklisted" db:"is_from_blacklisted"`
 	SweepTxHash      *string      `json:"sweep_tx_hash,omitempty" db:"sweep_tx_hash"`
 	LedgerEntryID    *uuid.UUID   `json:"ledger_entry_id,omitempty" db:"ledger_entry_id"`
 	DetectedAt       time.Time    `json:"detected_at" db:"detected_at"`
@@ -213,4 +215,158 @@ type SweepRecord struct {
 	DepositID       uuid.UUID `json:"deposit_id" db:"deposit_id"`
 	CreatedAt       time.Time `json:"created_at" db:"created_at"`
 	ConfirmedAt     *time.Time `json:"confirmed_at,omitempty" db:"confirmed_at"`
+}
+
+// BlacklistedAddress represents a known bad address
+type BlacklistedAddress struct {
+	ID         uuid.UUID  `json:"id" db:"id"`
+	Chain      string     `json:"chain" db:"chain"`
+	Address    string     `json:"address" db:"address"`
+	Source     string     `json:"source" db:"source"`
+	Reason     *string    `json:"reason,omitempty" db:"reason"`
+	DetectedAt time.Time  `json:"detected_at" db:"detected_at"`
+	IsActive   bool       `json:"is_active" db:"is_active"`
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+}
+
+// StablecoinContract represents a monitored stablecoin
+type StablecoinContract struct {
+	ID              uuid.UUID `json:"id" db:"id"`
+	Chain           string    `json:"chain" db:"chain"`
+	ContractAddress string    `json:"contract_address" db:"contract_address"`
+	Symbol          string    `json:"symbol" db:"symbol"`
+	Issuer          string    `json:"issuer" db:"issuer"`
+	HasBlacklist    bool      `json:"has_blacklist" db:"has_blacklist"`
+	HasFreeze       bool      `json:"has_freeze" db:"has_freeze"`
+	BlacklistMethod *string   `json:"blacklist_method,omitempty" db:"blacklist_method"`
+	FreezeMethod    *string   `json:"freeze_method,omitempty" db:"freeze_method"`
+	Decimals        int       `json:"decimals" db:"decimals"`
+	IsActive        bool      `json:"is_active" db:"is_active"`
+	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+}
+
+// FreezeEvent represents a freeze/blacklist event on-chain
+type FreezeEvent struct {
+	ID              uuid.UUID `json:"id" db:"id"`
+	Chain           string    `json:"chain" db:"chain"`
+	Address         string    `json:"address" db:"address"`
+	ContractAddress string    `json:"contract_address" db:"contract_address"`
+	EventType       string    `json:"event_type" db:"event_type"`
+	TxHash          *string   `json:"tx_hash,omitempty" db:"tx_hash"`
+	BlockNumber     *int64    `json:"block_number,omitempty" db:"block_number"`
+	DetectedAt      time.Time `json:"detected_at" db:"detected_at"`
+}
+
+// BlacklistCheckResult contains the result of a blacklist check
+type BlacklistCheckResult struct {
+	IsBlacklisted bool            `json:"is_blacklisted"`
+	Sources       []string        `json:"sources"`
+	Reasons       []string        `json:"reasons"`
+	FreezeStatus  map[string]bool `json:"freeze_status"`
+}
+
+// RebalancePolicy defines thresholds for automatic tier rebalancing
+type RebalancePolicy struct {
+	ID                 uuid.UUID `json:"id" db:"id"`
+	Chain              string    `json:"chain" db:"chain"`
+	TokenSymbol        string    `json:"token_symbol" db:"token_symbol"`
+	HotTargetPct       float64   `json:"hot_target_pct" db:"hot_target_pct"`
+	HotMaxPct          float64   `json:"hot_max_pct" db:"hot_max_pct"`
+	HotMinPct          float64   `json:"hot_min_pct" db:"hot_min_pct"`
+	WarmTargetPct      float64   `json:"warm_target_pct" db:"warm_target_pct"`
+	WarmMaxPct         float64   `json:"warm_max_pct" db:"warm_max_pct"`
+	MinRebalanceAmount *big.Int  `json:"min_rebalance_amount" db:"min_rebalance_amount"`
+	AutoRebalance      bool      `json:"auto_rebalance" db:"auto_rebalance"`
+	IsActive           bool      `json:"is_active" db:"is_active"`
+	CreatedAt          time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// RebalanceState represents the lifecycle of a rebalance operation
+type RebalanceState string
+
+const (
+	RebalancePending   RebalanceState = "PENDING"
+	RebalanceApproved  RebalanceState = "APPROVED"
+	RebalanceSigning   RebalanceState = "SIGNING"
+	RebalanceBroadcast RebalanceState = "BROADCAST"
+	RebalanceConfirmed RebalanceState = "CONFIRMED"
+	RebalanceFailed    RebalanceState = "FAILED"
+	RebalanceRejected  RebalanceState = "REJECTED"
+)
+
+// RebalanceOperation represents a fund movement between wallet tiers
+type RebalanceOperation struct {
+	ID               uuid.UUID      `json:"id" db:"id"`
+	Chain            string         `json:"chain" db:"chain"`
+	TokenSymbol      string         `json:"token_symbol" db:"token_symbol"`
+	FromTier         WalletTier     `json:"from_tier" db:"from_tier"`
+	ToTier           WalletTier     `json:"to_tier" db:"to_tier"`
+	FromWalletID     uuid.UUID      `json:"from_wallet_id" db:"from_wallet_id"`
+	ToWalletID       uuid.UUID      `json:"to_wallet_id" db:"to_wallet_id"`
+	Amount           *big.Int       `json:"amount" db:"amount"`
+	TxHash           *string        `json:"tx_hash,omitempty" db:"tx_hash"`
+	State            RebalanceState `json:"state" db:"state"`
+	RequiresApproval bool           `json:"requires_approval" db:"requires_approval"`
+	ApprovedBy       *string        `json:"approved_by,omitempty" db:"approved_by"`
+	LedgerEntryID    *uuid.UUID     `json:"ledger_entry_id,omitempty" db:"ledger_entry_id"`
+	ErrorMessage     *string        `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at" db:"updated_at"`
+}
+
+// TierBalance represents balance per tier for a chain/token
+type TierBalance struct {
+	Chain        string   `json:"chain"`
+	TokenSymbol  string   `json:"token_symbol"`
+	HotBalance   *big.Int `json:"hot_balance"`
+	WarmBalance  *big.Int `json:"warm_balance"`
+	ColdBalance  *big.Int `json:"cold_balance"`
+	TotalBalance *big.Int `json:"total_balance"`
+	HotPct       float64  `json:"hot_pct"`
+	WarmPct      float64  `json:"warm_pct"`
+	ColdPct      float64  `json:"cold_pct"`
+}
+
+// VelocityLimit defines withdrawal rate limits
+type VelocityLimit struct {
+	ID                  uuid.UUID `json:"id" db:"id"`
+	Scope               string    `json:"scope" db:"scope"` // GLOBAL, WORKSPACE, USER, CHAIN
+	ScopeID             *string   `json:"scope_id,omitempty" db:"scope_id"`
+	Chain               *string   `json:"chain,omitempty" db:"chain"`
+	TokenSymbol         *string   `json:"token_symbol,omitempty" db:"token_symbol"`
+	MaxAmountPerTx      *big.Int  `json:"max_amount_per_tx,omitempty" db:"max_amount_per_tx"`
+	MaxAmountPerHour    *big.Int  `json:"max_amount_per_hour,omitempty" db:"max_amount_per_hour"`
+	MaxAmountPerDay     *big.Int  `json:"max_amount_per_day,omitempty" db:"max_amount_per_day"`
+	MaxCountPerHour     *int      `json:"max_count_per_hour,omitempty" db:"max_count_per_hour"`
+	MaxCountPerDay      *int      `json:"max_count_per_day,omitempty" db:"max_count_per_day"`
+	CooldownSeconds     int       `json:"cooldown_seconds" db:"cooldown_seconds"`
+	GeoAllowedCountries []string  `json:"geo_allowed_countries,omitempty" db:"geo_allowed_countries"`
+	GeoBlockedCountries []string  `json:"geo_blocked_countries,omitempty" db:"geo_blocked_countries"`
+	IsActive            bool      `json:"is_active" db:"is_active"`
+	CreatedAt           time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// WithdrawalAttempt logs each withdrawal attempt for velocity tracking
+type WithdrawalAttempt struct {
+	ID                  uuid.UUID `json:"id" db:"id"`
+	WithdrawalID        uuid.UUID `json:"withdrawal_id" db:"withdrawal_id"`
+	WorkspaceID         uuid.UUID `json:"workspace_id" db:"workspace_id"`
+	UserID              uuid.UUID `json:"user_id" db:"user_id"`
+	Chain               string    `json:"chain" db:"chain"`
+	TokenSymbol         string    `json:"token_symbol" db:"token_symbol"`
+	Amount              *big.Int  `json:"amount" db:"amount"`
+	SourceIP            *string   `json:"source_ip,omitempty" db:"source_ip"`
+	CountryCode         *string   `json:"country_code,omitempty" db:"country_code"`
+	VelocityCheckPassed bool      `json:"velocity_check_passed" db:"velocity_check_passed"`
+	RejectionReason     *string   `json:"rejection_reason,omitempty" db:"rejection_reason"`
+	CreatedAt           time.Time `json:"created_at" db:"created_at"`
+}
+
+// VelocityCheckResult contains the result of a velocity check
+type VelocityCheckResult struct {
+	Allowed         bool     `json:"allowed"`
+	RejectionReason string   `json:"rejection_reason,omitempty"`
+	ApplicableRules []string `json:"applicable_rules"`
 }

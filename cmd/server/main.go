@@ -71,6 +71,9 @@ func main() {
 	hdRepo := repository.NewHDDerivationRepo(pool)
 	withdrawalRepo := repository.NewWithdrawalRepo(pool)
 	ledgerRepo := repository.NewLedgerRepo(pool)
+	rebalanceRepo := repository.NewRebalanceRepo(pool)
+	blacklistRepo := repository.NewBlacklistRepo(pool)
+	velocityRepo := repository.NewVelocityRepo(pool)
 
 	// Redpanda producer (non-fatal if unavailable)
 	var producer *messaging.RedpandaProducer
@@ -86,7 +89,12 @@ func main() {
 
 	// Ledger and withdrawal services
 	ledgerSvc := service.NewLedgerService(ledgerRepo)
-	withdrawalSvc := service.NewWithdrawalService(withdrawalRepo, walletRepo, ledgerSvc, producer)
+	velocitySvc := service.NewVelocityService(velocityRepo, withdrawalRepo)
+	withdrawalSvc := service.NewWithdrawalService(withdrawalRepo, walletRepo, ledgerSvc, producer, nil, velocitySvc)
+	rebalanceSvc := service.NewRebalanceService(rebalanceRepo, walletRepo, ledgerSvc)
+
+	// Signer (MPC/HSM/local key management)
+	signer := service.NewSigner(cfg.Signer, walletRepo)
 
 	// Deposit indexer
 	indexer := service.NewDepositIndexer(cfg.Chains, depositRepo, addrRepo, indexRepo, producer)
@@ -95,13 +103,18 @@ func main() {
 	}
 	defer indexer.Stop()
 
+	// Blacklist service (needs EVM adapters from indexer)
+	blacklistSvc := service.NewBlacklistService(blacklistRepo, indexer.GetEVMAdapters())
+	indexer.SetBlacklistService(blacklistSvc)
+	withdrawalSvc.SetBlacklistService(blacklistSvc)
+
 	// HTTP server
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
 
-	h := handler.NewHandler(depositRepo, addrRepo, walletRepo, indexer, addrSvc, withdrawalSvc, ledgerSvc)
+	h := handler.NewHandler(depositRepo, addrRepo, walletRepo, indexer, addrSvc, withdrawalSvc, ledgerSvc, rebalanceSvc, signer, blacklistSvc, velocitySvc)
 	h.RegisterRoutes(r)
 
 	srv := &http.Server{
@@ -151,21 +164,30 @@ func main() {
 }
 
 func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
-	migrationSQL, err := os.ReadFile("migrations/001_foundation.sql")
-	if err != nil {
-		// Try alternate path for containerized deployment
-		migrationSQL, err = os.ReadFile("/app/migrations/001_foundation.sql")
-		if err != nil {
-			log.Warn().Msg("migration file not found, skipping migrations")
-			return nil
-		}
+	migrationFiles := []string{
+		"migrations/001_foundation.sql",
+		"migrations/002_velocity_limits.sql",
+		"migrations/003_blacklist.sql",
+		"migrations/004_rebalance.sql",
 	}
+	altPrefix := "/app/"
 
-	_, err = pool.Exec(ctx, string(migrationSQL))
-	if err != nil {
-		return fmt.Errorf("execute migration: %w", err)
+	for _, file := range migrationFiles {
+		migrationSQL, err := os.ReadFile(file)
+		if err != nil {
+			migrationSQL, err = os.ReadFile(altPrefix + file)
+			if err != nil {
+				log.Warn().Str("file", file).Msg("migration file not found, skipping")
+				continue
+			}
+		}
+
+		_, err = pool.Exec(ctx, string(migrationSQL))
+		if err != nil {
+			return fmt.Errorf("execute migration %s: %w", file, err)
+		}
+		log.Info().Str("file", file).Msg("migration applied")
 	}
-	log.Info().Msg("migrations applied")
 	return nil
 }
 

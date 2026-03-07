@@ -13,6 +13,18 @@ type Config struct {
 	Redis    RedisConfig
 	Redpanda RedpandaConfig
 	Chains   []ChainConfig
+	Signer   SignerConfig
+}
+
+// SignerConfig configures the key management backend
+type SignerConfig struct {
+	Type          string // "local", "vault", "mpc"
+	EncryptionKey string // For local signer (AES-256 key, hex-encoded)
+	VaultAddr     string // For vault signer
+	VaultToken    string
+	MPCURL        string // For MPC signer
+	MPCKey        string
+	MPCSecret     string
 }
 
 type ServerConfig struct {
@@ -78,6 +90,15 @@ func Load() *Config {
 			GroupID: envStr("REDPANDA_GROUP_ID", "wallet-engine"),
 		},
 		Chains: defaultChains(),
+		Signer: SignerConfig{
+			Type:          envStr("SIGNER_TYPE", "local"),
+			EncryptionKey: envStr("SIGNER_ENCRYPTION_KEY", ""),
+			VaultAddr:     envStr("VAULT_ADDR", ""),
+			VaultToken:    envStr("VAULT_TOKEN", ""),
+			MPCURL:        envStr("MPC_URL", ""),
+			MPCKey:        envStr("MPC_KEY", ""),
+			MPCSecret:     envStr("MPC_SECRET", ""),
+		},
 	}
 }
 

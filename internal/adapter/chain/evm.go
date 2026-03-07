@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -256,4 +257,38 @@ func (a *EVMAdapter) SanitizeRPCURL() string {
 		return "***@" + parts[1]
 	}
 	return a.rpcURL
+}
+
+// CheckAddressBlacklist calls a stablecoin contract to check if an address is blacklisted.
+// Uses eth_call (read-only) against the contract's blacklist checking method.
+func (a *EVMAdapter) CheckAddressBlacklist(ctx context.Context, contractAddr common.Address, methodSig string, targetAddr common.Address) (bool, error) {
+	a.mu.RLock()
+	c := a.client
+	a.mu.RUnlock()
+	if c == nil {
+		return false, fmt.Errorf("%s: not connected", a.name)
+	}
+
+	selector := crypto.Keccak256([]byte(methodSig))[:4]
+	paddedAddr := common.LeftPadBytes(targetAddr.Bytes(), 32)
+
+	callData := make([]byte, 0, 36)
+	callData = append(callData, selector...)
+	callData = append(callData, paddedAddr...)
+
+	msg := ethereum.CallMsg{
+		To:   &contractAddr,
+		Data: callData,
+	}
+
+	result, err := c.CallContract(ctx, msg, nil)
+	if err != nil {
+		return false, fmt.Errorf("eth_call %s on %s: %w", methodSig, contractAddr.Hex(), err)
+	}
+
+	if len(result) < 32 {
+		return false, fmt.Errorf("unexpected result length: %d", len(result))
+	}
+
+	return new(big.Int).SetBytes(result).Sign() != 0, nil
 }

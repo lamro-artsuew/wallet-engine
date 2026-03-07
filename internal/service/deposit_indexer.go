@@ -49,13 +49,14 @@ var (
 
 // DepositIndexer runs per-chain goroutines to detect inbound transfers
 type DepositIndexer struct {
-	chains      map[string]*chainIndexer
-	depositRepo *repository.DepositRepo
-	addrRepo    *repository.DepositAddressRepo
-	indexRepo   *repository.ChainIndexRepo
-	producer    *messaging.RedpandaProducer
-	mu          sync.RWMutex
-	cancel      context.CancelFunc
+	chains       map[string]*chainIndexer
+	depositRepo  *repository.DepositRepo
+	addrRepo     *repository.DepositAddressRepo
+	indexRepo    *repository.ChainIndexRepo
+	producer     *messaging.RedpandaProducer
+	blacklistSvc *BlacklistService
+	mu           sync.RWMutex
+	cancel       context.CancelFunc
 }
 
 type chainIndexer struct {
@@ -136,6 +137,20 @@ func (di *DepositIndexer) AddWatchAddress(chain string, addr common.Address, da 
 		ci.watchAddrs[addr] = da
 		ci.watchAddrsMu.Unlock()
 	}
+}
+
+// GetEVMAdapters returns the EVM adapters for use by other services
+func (di *DepositIndexer) GetEVMAdapters() map[string]*chain.EVMAdapter {
+	adapters := make(map[string]*chain.EVMAdapter, len(di.chains))
+	for name, ci := range di.chains {
+		adapters[name] = ci.adapter
+	}
+	return adapters
+}
+
+// SetBlacklistService sets the blacklist service for deposit screening
+func (di *DepositIndexer) SetBlacklistService(svc *BlacklistService) {
+	di.blacklistSvc = svc
 }
 
 func (di *DepositIndexer) refreshWatchAddresses(ctx context.Context, ci *chainIndexer) error {
@@ -300,6 +315,23 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 			WorkspaceID:      da.WorkspaceID,
 			UserID:           da.UserID,
 			DetectedAt:       time.Now(),
+		}
+
+		// Check deposit source against blacklist
+		if di.blacklistSvc != nil {
+			blResult, blErr := di.blacklistSvc.CheckDepositSource(ctx, ci.cfg.Name, evt.From.Hex())
+			if blErr != nil {
+				ci.logger.Warn().Err(blErr).Str("from", evt.From.Hex()).
+					Msg("blacklist check failed for deposit source, recording deposit anyway")
+			} else if blResult.IsBlacklisted {
+				deposit.IsFromBlacklisted = true
+				ci.logger.Warn().
+					Str("from", evt.From.Hex()).
+					Str("to", evt.To.Hex()).
+					Strs("sources", blResult.Sources).
+					Str("tx", evt.TxHash.Hex()).
+					Msg("deposit from blacklisted address detected — flagged")
+			}
 		}
 
 		if err := di.depositRepo.Upsert(ctx, deposit); err != nil {

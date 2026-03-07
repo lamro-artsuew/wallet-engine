@@ -49,6 +49,8 @@ type WithdrawalService struct {
 	walletRepo     *repository.WalletRepo
 	ledgerSvc      *LedgerService
 	producer       *messaging.RedpandaProducer
+	blacklistSvc   *BlacklistService
+	velocitySvc    *VelocityService
 }
 
 // NewWithdrawalService creates a new withdrawal service
@@ -57,13 +59,22 @@ func NewWithdrawalService(
 	walletRepo *repository.WalletRepo,
 	ledgerSvc *LedgerService,
 	producer *messaging.RedpandaProducer,
+	blacklistSvc *BlacklistService,
+	velocitySvc *VelocityService,
 ) *WithdrawalService {
 	return &WithdrawalService{
 		withdrawalRepo: withdrawalRepo,
 		walletRepo:     walletRepo,
 		ledgerSvc:      ledgerSvc,
 		producer:       producer,
+		blacklistSvc:   blacklistSvc,
+		velocitySvc:    velocitySvc,
 	}
+}
+
+// SetBlacklistService sets the blacklist service (used for late initialization)
+func (s *WithdrawalService) SetBlacklistService(svc *BlacklistService) {
+	s.blacklistSvc = svc
 }
 
 // CreateWithdrawalRequest holds the data for creating a withdrawal
@@ -77,6 +88,8 @@ type CreateWithdrawalRequest struct {
 	TokenSymbol    string
 	Amount         *big.Int
 	Decimals       int
+	SourceIP       string
+	CountryCode    string
 }
 
 // CreateWithdrawal initiates a new withdrawal request
@@ -90,6 +103,37 @@ func (s *WithdrawalService) CreateWithdrawal(ctx context.Context, req CreateWith
 	// Validate destination address
 	if !ValidateAddress(req.Chain, req.ToAddress) {
 		return nil, fmt.Errorf("invalid destination address %s for chain %s", req.ToAddress, req.Chain)
+	}
+
+	// Check destination against blacklist
+	if s.blacklistSvc != nil {
+		result, err := s.blacklistSvc.CheckAddress(ctx, req.Chain, req.ToAddress)
+		if err != nil {
+			return nil, fmt.Errorf("blacklist check failed: %w", err)
+		}
+		if result.IsBlacklisted {
+			return nil, fmt.Errorf("destination address %s is blacklisted (sources: %s)",
+				req.ToAddress, strings.Join(result.Sources, ", "))
+		}
+	}
+
+	// Velocity check — enforce rate limits and geo restrictions before creating the withdrawal
+	if s.velocitySvc != nil {
+		preCheck := &domain.Withdrawal{
+			ID:          uuid.New(),
+			WorkspaceID: req.WorkspaceID,
+			UserID:      req.UserID,
+			Chain:       req.Chain,
+			TokenSymbol: req.TokenSymbol,
+			Amount:      req.Amount,
+		}
+		velocityResult, err := s.velocitySvc.CheckWithdrawal(ctx, preCheck, req.SourceIP, req.CountryCode)
+		if err != nil {
+			return nil, fmt.Errorf("velocity check failed: %w", err)
+		}
+		if !velocityResult.Allowed {
+			return nil, fmt.Errorf("velocity check rejected: %s", velocityResult.RejectionReason)
+		}
 	}
 
 	// Find hot wallet for the chain
