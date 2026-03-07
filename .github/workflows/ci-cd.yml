@@ -1,4 +1,4 @@
-name: CI — Build & Push
+name: CI/CD — Build, Push & Deploy
 
 on:
   push:
@@ -13,11 +13,13 @@ env:
   IMAGE_NAME: wallet-engine
 
 jobs:
-  build:
+  build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    outputs:
+      sha_tag: ${{ steps.tags.outputs.sha_tag }}
 
     steps:
       - name: Checkout
@@ -75,3 +77,33 @@ jobs:
           format: 'table'
           exit-code: '0'
           severity: 'CRITICAL,HIGH'
+
+  deploy:
+    needs: build-and-push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT || github.token }}
+
+      - name: Update K8s image tag
+        run: |
+          SHA_TAG="${{ needs.build-and-push.outputs.sha_tag }}"
+          cd k8s/overlays/production
+          sed -i "s|newTag:.*|newTag: ${SHA_TAG}|" kustomization.yaml
+          cd ../../base
+          sed -i "s|image:.*wallet-engine.*|image: ${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:${SHA_TAG}|" deployment.yaml
+
+      - name: Commit and push manifest update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          SHA_TAG="${{ needs.build-and-push.outputs.sha_tag }}"
+          git add k8s/
+          git diff --cached --quiet || git commit -m "deploy: update wallet-engine to ${SHA_TAG} [skip ci]"
+          git push
