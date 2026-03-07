@@ -46,6 +46,8 @@ func NewHandler(
 
 // RegisterRoutes registers all API routes
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
+	r.GET("/", h.Root)
+
 	api := r.Group("/api/v1")
 	{
 		api.GET("/health", h.Health)
@@ -75,6 +77,24 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		api.GET("/ledger/balances/:code", h.GetAccountBalance)
 		api.GET("/ledger/integrity", h.VerifyLedgerIntegrity)
 	}
+}
+
+// Root returns API information
+func (h *Handler) Root(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"service":     "wallet-engine",
+		"version":     "1.0.0",
+		"description": "Exchange-grade custody microservice — hot/warm/cold wallet tiering, deposit indexing, withdrawal orchestration",
+		"endpoints": gin.H{
+			"health":      "GET  /api/v1/health",
+			"addresses":   "POST /api/v1/addresses, GET /api/v1/addresses",
+			"deposits":    "GET  /api/v1/deposits, GET /api/v1/deposits/:id",
+			"withdrawals": "POST /api/v1/withdrawals, GET /api/v1/withdrawals, GET /api/v1/withdrawals/:id",
+			"wallets":     "GET  /api/v1/wallets",
+			"chains":      "GET  /api/v1/chains",
+			"ledger":      "GET  /api/v1/ledger/accounts, GET /api/v1/ledger/entries, GET /api/v1/ledger/balances/:code, GET /api/v1/ledger/integrity",
+		},
+	})
 }
 
 // Health returns service health
