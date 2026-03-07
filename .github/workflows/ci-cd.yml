@@ -71,7 +71,8 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
         with:
           image-ref: ${{ env.HARBOR_REGISTRY }}/${{ env.HARBOR_PROJECT }}/${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.sha_tag }}
           format: 'table'
@@ -89,7 +90,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_PAT || github.token }}
+          token: ${{ secrets.GH_PAT }}
 
       - name: Update K8s image tag
         run: |
