@@ -172,11 +172,56 @@ func (h *Handler) Root(c *gin.Context) {
 
 // Health returns service health
 func (h *Handler) Health(c *gin.Context) {
-	chains := h.indexer.GetChainHealth(c.Request.Context())
+	chainsMap := h.indexer.GetChainHealth(c.Request.Context())
+
+	// Build chains array for frontend consumption
+	var chainsArray []gin.H
+	activeCount := 0
+	for name, raw := range chainsMap {
+		chainInfo, _ := raw.(map[string]interface{})
+		connected := false
+		if c, ok := chainInfo["connected"].(bool); ok {
+			connected = c
+		}
+		if connected {
+			activeCount++
+		}
+		status := "disconnected"
+		if connected {
+			status = "connected"
+		}
+		entry := gin.H{
+			"chain":  name,
+			"status": status,
+		}
+		if bh, ok := chainInfo["latest_block"]; ok {
+			entry["blockHeight"] = bh
+		}
+		if lib, ok := chainInfo["last_indexed_block"]; ok {
+			entry["lastIndexedBlock"] = lib
+		}
+		chainsArray = append(chainsArray, entry)
+	}
+
+	// Count pending withdrawals
+	pendingCount := 0
+	for _, state := range []domain.WithdrawalState{domain.WithdrawalInitiated, domain.WithdrawalRiskCheck, domain.WithdrawalSigned, domain.WithdrawalBroadcast} {
+		for name := range chainsMap {
+			wds, err := h.withdrawalSvc.ListByChainAndState(c.Request.Context(), name, state)
+			if err == nil {
+				pendingCount += len(wds)
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"status":  "healthy",
-		"service": "wallet-engine",
-		"chains":  chains,
+		"status":             "healthy",
+		"service":            "wallet-engine",
+		"chains":             chainsArray,
+		"activeChains":       activeCount,
+		"pendingWithdrawals": pendingCount,
+		"totalAssetsUsd":     0,
+		"hotWalletPercent":   0,
 	})
 }
 
