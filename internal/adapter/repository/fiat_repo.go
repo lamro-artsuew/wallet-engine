@@ -70,6 +70,31 @@ func (r *FiatRepo) ListFiatAccounts(ctx context.Context, workspaceID uuid.UUID) 
 	return accounts, rows.Err()
 }
 
+// ListAllFiatAccounts returns all active fiat accounts across workspaces (admin view)
+func (r *FiatRepo) ListAllFiatAccounts(ctx context.Context) ([]*domain.FiatAccount, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, workspace_id, currency, provider, provider_account_id, account_type,
+			balance, is_active, created_at, updated_at
+		FROM fiat_accounts WHERE is_active = TRUE
+		ORDER BY workspace_id, currency, account_type
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var accounts []*domain.FiatAccount
+	for rows.Next() {
+		a := &domain.FiatAccount{}
+		if err := rows.Scan(&a.ID, &a.WorkspaceID, &a.Currency, &a.Provider, &a.ProviderAccountID,
+			&a.AccountType, &a.Balance, &a.IsActive, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, a)
+	}
+	return accounts, rows.Err()
+}
+
 // UpdateBalance updates the balance of a fiat account
 func (r *FiatRepo) UpdateBalance(ctx context.Context, id uuid.UUID, newBalance float64) error {
 	tag, err := r.pool.Exec(ctx, `
@@ -121,6 +146,37 @@ func (r *FiatRepo) ListTransactions(ctx context.Context, workspaceID uuid.UUID, 
 		FROM fiat_transactions WHERE workspace_id = $1
 		ORDER BY created_at DESC LIMIT $2 OFFSET $3
 	`, workspaceID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var txs []*domain.FiatTransaction
+	for rows.Next() {
+		t := &domain.FiatTransaction{}
+		var metadataJSON []byte
+		if err := rows.Scan(&t.ID, &t.WorkspaceID, &t.FiatAccountID, &t.Type, &t.Currency, &t.Amount,
+			&t.Reference, &t.Counterparty, &t.State, &t.LedgerEntryID, &metadataJSON,
+			&t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		t.Metadata = make(map[string]interface{})
+		if len(metadataJSON) > 0 {
+			json.Unmarshal(metadataJSON, &t.Metadata)
+		}
+		txs = append(txs, t)
+	}
+	return txs, rows.Err()
+}
+
+// ListAllTransactions returns paginated fiat transactions across all workspaces (admin view)
+func (r *FiatRepo) ListAllTransactions(ctx context.Context, limit, offset int) ([]*domain.FiatTransaction, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, workspace_id, fiat_account_id, type, currency, amount,
+			reference, counterparty, state, ledger_entry_id, metadata, created_at, updated_at
+		FROM fiat_transactions
+		ORDER BY created_at DESC LIMIT $1 OFFSET $2
+	`, limit, offset)
 	if err != nil {
 		return nil, err
 	}

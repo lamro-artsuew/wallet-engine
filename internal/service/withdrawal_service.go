@@ -240,6 +240,11 @@ func (s *WithdrawalService) ListByWorkspace(ctx context.Context, workspaceID uui
 	return s.withdrawalRepo.FindByWorkspace(ctx, workspaceID, limit, offset)
 }
 
+// ListAll returns all withdrawals with pagination (admin view)
+func (s *WithdrawalService) ListAll(ctx context.Context, limit, offset int) ([]*domain.Withdrawal, error) {
+	return s.withdrawalRepo.FindAll(ctx, limit, offset)
+}
+
 // ListByChainAndState returns withdrawals for a chain in a state
 func (s *WithdrawalService) ListByChainAndState(ctx context.Context, chain string, state domain.WithdrawalState) ([]*domain.Withdrawal, error) {
 	return s.withdrawalRepo.FindByChainAndState(ctx, chain, state)

@@ -164,6 +164,24 @@ func (r *WithdrawalRepo) FindByWorkspace(ctx context.Context, workspaceID uuid.U
 	return scanWithdrawals(rows)
 }
 
+// FindAll returns all withdrawals with pagination (admin view)
+func (r *WithdrawalRepo) FindAll(ctx context.Context, limit, offset int) ([]*domain.Withdrawal, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, idempotency_key, workspace_id, user_id, chain, to_address,
+			token_address, token_symbol, amount, decimals, state, tx_hash, nonce,
+			gas_price, gas_used, fee, risk_score, risk_level, source_wallet_id,
+			ledger_entry_id, error_message, confirmations, required_confirmations,
+			created_at, updated_at, broadcast_at, confirmed_at
+		FROM withdrawals
+		ORDER BY created_at DESC LIMIT $1 OFFSET $2
+	`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanWithdrawals(rows)
+}
+
 func scanWithdrawal(row pgx.Row) (*domain.Withdrawal, error) {
 	w := &domain.Withdrawal{}
 	var amountStr string

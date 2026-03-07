@@ -116,6 +116,24 @@ func (r *DepositRepo) FindByWorkspace(ctx context.Context, workspaceID uuid.UUID
 	return scanDeposits(rows)
 }
 
+// FindAll returns all deposits with pagination (admin view)
+func (r *DepositRepo) FindAll(ctx context.Context, limit, offset int) ([]*domain.Deposit, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, idempotency_key, chain, tx_hash, log_index, block_number, block_hash,
+			from_address, to_address, token_address, token_symbol, amount, decimals,
+			state, confirmations, required_confirmations, deposit_address_id,
+			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at,
+			is_from_blacklisted
+		FROM deposits
+		ORDER BY created_at DESC LIMIT $1 OFFSET $2
+	`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanDeposits(rows)
+}
+
 // FindByID returns a single deposit by ID
 func (r *DepositRepo) FindByID(ctx context.Context, id uuid.UUID) (*domain.Deposit, error) {
 	rows, err := r.pool.Query(ctx, `

@@ -299,7 +299,16 @@ func (h *Handler) ListDeposits(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusBadRequest, gin.H{"error": "provide user_id or workspace_id query parameter"})
+	// No filter — return all deposits (admin view)
+	deposits, err := h.depositRepo.FindAll(c.Request.Context(), limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if deposits == nil {
+		deposits = []*domain.Deposit{}
+	}
+	c.JSON(http.StatusOK, deposits)
 }
 
 // GetDeposit returns a specific deposit by ID
@@ -428,7 +437,16 @@ func (h *Handler) ListWithdrawals(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusBadRequest, gin.H{"error": "provide user_id or workspace_id query parameter"})
+	// No filter — return all withdrawals (admin view)
+	withdrawals, err := h.withdrawalSvc.ListAll(c.Request.Context(), limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if withdrawals == nil {
+		withdrawals = []*domain.Withdrawal{}
+	}
+	c.JSON(http.StatusOK, withdrawals)
 }
 
 // GetWithdrawal returns a specific withdrawal by ID
@@ -1055,11 +1073,20 @@ func (h *Handler) CreateFiatAccount(c *gin.Context) {
 	c.JSON(http.StatusCreated, account)
 }
 
-// ListFiatAccounts returns fiat accounts for a workspace
+// ListFiatAccounts returns fiat accounts for a workspace or all (admin)
 func (h *Handler) ListFiatAccounts(c *gin.Context) {
 	workspaceIDStr := c.Query("workspace_id")
 	if workspaceIDStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "workspace_id query parameter required"})
+		// No workspace filter — return all accounts (admin view)
+		accounts, err := h.fiatRepo.ListAllFiatAccounts(c.Request.Context())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if accounts == nil {
+			accounts = []*domain.FiatAccount{}
+		}
+		c.JSON(http.StatusOK, accounts)
 		return
 	}
 
@@ -1154,9 +1181,24 @@ func (h *Handler) RecordFiatWithdrawal(c *gin.Context) {
 
 // ListFiatTransactions returns fiat transactions for a workspace
 func (h *Handler) ListFiatTransactions(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if limit > 100 {
+		limit = 100
+	}
+
 	workspaceIDStr := c.Query("workspace_id")
 	if workspaceIDStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "workspace_id query parameter required"})
+		// No workspace filter — return all transactions (admin view)
+		txs, err := h.fiatRepo.ListAllTransactions(c.Request.Context(), limit, offset)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if txs == nil {
+			txs = []*domain.FiatTransaction{}
+		}
+		c.JSON(http.StatusOK, txs)
 		return
 	}
 
@@ -1164,12 +1206,6 @@ func (h *Handler) ListFiatTransactions(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workspace_id"})
 		return
-	}
-
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	if limit > 100 {
-		limit = 100
 	}
 
 	txs, err := h.fiatRepo.ListTransactions(c.Request.Context(), workspaceID, limit, offset)
