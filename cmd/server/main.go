@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -116,6 +117,7 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(corsMiddleware())
 	r.Use(requestLogger())
 
 	h := handler.NewHandler(depositRepo, addrRepo, walletRepo, indexer, addrSvc, withdrawalSvc, ledgerSvc, rebalanceSvc, signer, blacklistSvc, velocitySvc, fiatBridgeSvc, fiatRepo)
@@ -206,6 +208,32 @@ func requestLogger() gin.HandlerFunc {
 			Int("status", c.Writer.Status()).
 			Dur("latency", time.Since(start)).
 			Msg("request")
+	}
+}
+
+func corsMiddleware() gin.HandlerFunc {
+	allowedOrigins := envStr("CORS_ALLOWED_ORIGINS", "*")
+	return func(c *gin.Context) {
+		origin := c.Request.Header.Get("Origin")
+		if allowedOrigins == "*" {
+			c.Header("Access-Control-Allow-Origin", "*")
+		} else {
+			for _, o := range strings.Split(allowedOrigins, ",") {
+				if strings.TrimSpace(o) == origin {
+					c.Header("Access-Control-Allow-Origin", origin)
+					break
+				}
+			}
+		}
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-API-Key")
+		c.Header("Access-Control-Allow-Credentials", "true")
+		c.Header("Access-Control-Max-Age", "3600")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
 	}
 }
 
