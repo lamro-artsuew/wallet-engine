@@ -12,4 +12,4 @@ replicas:
 
 images:
   - name: harbor.157.180.105.202.nip.io/osonx/wallet-engine
-    newTag: v0.1.0
+    newTag: sha-75e2c373
