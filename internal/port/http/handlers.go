@@ -87,6 +87,10 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 
 		// Wallets
 		api.GET("/wallets", h.ListWallets)
+		api.POST("/wallets", h.CreateWallet)
+		api.GET("/wallets/:id", h.GetWallet)
+		api.PUT("/wallets/:id", h.UpdateWallet)
+		api.DELETE("/wallets/:id", h.DeactivateWallet)
 
 		// Chain status
 		api.GET("/chains", h.ChainHealth)
@@ -272,6 +276,9 @@ func (h *Handler) CreateAddress(c *gin.Context) {
 func (h *Handler) ListAddresses(c *gin.Context) {
 	chain := c.Query("chain")
 	userIDStr := c.Query("user_id")
+	workspaceIDStr := c.Query("workspace_id")
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 
 	if userIDStr != "" {
 		userID, err := uuid.Parse(userIDStr)
@@ -290,17 +297,15 @@ func (h *Handler) ListAddresses(c *gin.Context) {
 		}
 	}
 
-	if chain != "" {
-		addrs, err := h.addrRepo.FindByChain(c.Request.Context(), chain)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, addrs)
+	addrs, err := h.addrRepo.FindAll(c.Request.Context(), chain, workspaceIDStr, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	c.JSON(http.StatusBadRequest, gin.H{"error": "provide chain or user_id query parameter"})
+	if addrs == nil {
+		addrs = []*domain.DepositAddress{}
+	}
+	c.JSON(http.StatusOK, addrs)
 }
 
 // ListDeposits returns deposits with pagination and filters
@@ -511,14 +516,172 @@ func (h *Handler) GetWithdrawal(c *gin.Context) {
 	c.JSON(http.StatusOK, withdrawal)
 }
 
-// ListWallets returns all managed wallets
+// ListWallets returns all managed wallets with optional chain/tier filter
 func (h *Handler) ListWallets(c *gin.Context) {
+	chain := c.Query("chain")
+	tier := c.Query("tier")
+
+	if chain != "" && tier != "" {
+		wallets, err := h.walletRepo.FindByChainAndTier(c.Request.Context(), chain, domain.WalletTier(tier))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if wallets == nil {
+			wallets = []*domain.Wallet{}
+		}
+		c.JSON(http.StatusOK, wallets)
+		return
+	}
+
+	if chain != "" {
+		wallets, err := h.walletRepo.FindByChain(c.Request.Context(), chain)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if wallets == nil {
+			wallets = []*domain.Wallet{}
+		}
+		c.JSON(http.StatusOK, wallets)
+		return
+	}
+
 	wallets, err := h.walletRepo.FindAll(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if wallets == nil {
+		wallets = []*domain.Wallet{}
+	}
 	c.JSON(http.StatusOK, wallets)
+}
+
+// CreateWalletRequest is the request body for creating a wallet
+type CreateWalletRequest struct {
+	Chain   string `json:"chain" binding:"required"`
+	Address string `json:"address" binding:"required"`
+	Tier    string `json:"tier" binding:"required"`
+	Label   string `json:"label"`
+}
+
+// CreateWallet registers a new managed wallet
+func (h *Handler) CreateWallet(c *gin.Context) {
+	var req CreateWalletRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	tier := domain.WalletTier(strings.ToUpper(req.Tier))
+	if tier != domain.WalletTierHot && tier != domain.WalletTierWarm && tier != domain.WalletTierCold {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tier must be HOT, WARM, or COLD"})
+		return
+	}
+
+	w := &domain.Wallet{
+		ID:       uuid.New(),
+		Chain:    strings.ToLower(req.Chain),
+		Address:  req.Address,
+		Tier:     tier,
+		Label:    req.Label,
+		IsActive: true,
+	}
+
+	if err := h.walletRepo.Create(c.Request.Context(), w); err != nil {
+		if strings.Contains(err.Error(), "duplicate") || strings.Contains(err.Error(), "unique") {
+			c.JSON(http.StatusConflict, gin.H{"error": "wallet with this chain/address already exists"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, w)
+}
+
+// GetWallet returns a single wallet by ID
+func (h *Handler) GetWallet(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid wallet id"})
+		return
+	}
+
+	wallet, err := h.walletRepo.FindByID(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "wallet not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, wallet)
+}
+
+// UpdateWalletRequest is the request body for updating a wallet
+type UpdateWalletRequest struct {
+	Label string `json:"label"`
+	Tier  string `json:"tier"`
+}
+
+// UpdateWallet modifies a wallet's label and/or tier
+func (h *Handler) UpdateWallet(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid wallet id"})
+		return
+	}
+
+	var req UpdateWalletRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	existing, err := h.walletRepo.FindByID(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "wallet not found"})
+		return
+	}
+
+	label := existing.Label
+	if req.Label != "" {
+		label = req.Label
+	}
+
+	tier := existing.Tier
+	if req.Tier != "" {
+		t := domain.WalletTier(strings.ToUpper(req.Tier))
+		if t != domain.WalletTierHot && t != domain.WalletTierWarm && t != domain.WalletTierCold {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "tier must be HOT, WARM, or COLD"})
+			return
+		}
+		tier = t
+	}
+
+	if err := h.walletRepo.Update(c.Request.Context(), id, label, tier); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	updated, _ := h.walletRepo.FindByID(c.Request.Context(), id)
+	c.JSON(http.StatusOK, updated)
+}
+
+// DeactivateWallet soft-deletes a wallet
+func (h *Handler) DeactivateWallet(c *gin.Context) {
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid wallet id"})
+		return
+	}
+
+	if err := h.walletRepo.Deactivate(c.Request.Context(), id); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "wallet deactivated"})
 }
 
 // ChainHealth returns per-chain indexer health

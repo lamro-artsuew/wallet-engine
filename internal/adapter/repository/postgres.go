@@ -347,6 +347,107 @@ func (r *WalletRepo) Create(ctx context.Context, w *domain.Wallet) error {
 	return err
 }
 
+// Update modifies a wallet's label and tier
+func (r *WalletRepo) Update(ctx context.Context, id uuid.UUID, label string, tier domain.WalletTier) error {
+	res, err := r.pool.Exec(ctx, `
+		UPDATE wallets SET label = $2, tier = $3, updated_at = NOW()
+		WHERE id = $1 AND is_active = TRUE
+	`, id, label, string(tier))
+	if err != nil {
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return fmt.Errorf("wallet %s not found", id)
+	}
+	return nil
+}
+
+// Deactivate soft-deletes a wallet
+func (r *WalletRepo) Deactivate(ctx context.Context, id uuid.UUID) error {
+	res, err := r.pool.Exec(ctx, `
+		UPDATE wallets SET is_active = FALSE, updated_at = NOW()
+		WHERE id = $1 AND is_active = TRUE
+	`, id)
+	if err != nil {
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return fmt.Errorf("wallet %s not found", id)
+	}
+	return nil
+}
+
+// FindByChain returns all active wallets for a chain
+func (r *WalletRepo) FindByChain(ctx context.Context, chain string) ([]*domain.Wallet, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, chain, address, tier, label, is_active, created_at, updated_at
+		FROM wallets WHERE chain = $1 AND is_active = TRUE ORDER BY tier
+	`, chain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var wallets []*domain.Wallet
+	for rows.Next() {
+		w := &domain.Wallet{}
+		if err := rows.Scan(&w.ID, &w.Chain, &w.Address, &w.Tier, &w.Label, &w.IsActive, &w.CreatedAt, &w.UpdatedAt); err != nil {
+			return nil, err
+		}
+		wallets = append(wallets, w)
+	}
+	return wallets, rows.Err()
+}
+
+// FindAllAddresses returns all active deposit addresses with optional filters
+func (r *DepositAddressRepo) FindAll(ctx context.Context, chain, workspaceID string, limit, offset int) ([]*domain.DepositAddress, error) {
+	query := `SELECT id, workspace_id, user_id, chain, address, derivation_path, derivation_index, is_active, created_at
+		FROM deposit_addresses WHERE is_active = TRUE`
+	args := []interface{}{}
+	argIdx := 1
+
+	if chain != "" {
+		query += fmt.Sprintf(" AND chain = $%d", argIdx)
+		args = append(args, chain)
+		argIdx++
+	}
+	if workspaceID != "" {
+		wsID, err := uuid.Parse(workspaceID)
+		if err == nil {
+			query += fmt.Sprintf(" AND workspace_id = $%d", argIdx)
+			args = append(args, wsID)
+			argIdx++
+		}
+	}
+	query += " ORDER BY created_at DESC"
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT $%d", argIdx)
+		args = append(args, limit)
+		argIdx++
+	}
+	if offset > 0 {
+		query += fmt.Sprintf(" OFFSET $%d", argIdx)
+		args = append(args, offset)
+		argIdx++
+	}
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var addrs []*domain.DepositAddress
+	for rows.Next() {
+		a := &domain.DepositAddress{}
+		if err := rows.Scan(&a.ID, &a.WorkspaceID, &a.UserID, &a.Chain, &a.Address, &a.DerivationPath, &a.DerivationIdx, &a.IsActive, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		addrs = append(addrs, a)
+	}
+	return addrs, rows.Err()
+}
+
 // HDDerivationRepo manages HD derivation state
 type HDDerivationRepo struct {
 	pool *pgxpool.Pool
