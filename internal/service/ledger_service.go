@@ -291,6 +291,110 @@ func (s *LedgerService) PostSweepEntry(ctx context.Context, sweep *domain.SweepR
 	return nil
 }
 
+// PostFiatEntry creates a balanced double-entry journal for fiat/bridge operations.
+// Returns the entry ID for linking to fiat transactions.
+func (s *LedgerService) PostFiatEntry(ctx context.Context, idempotencyKey, entryType, description string,
+	debitAccountCode, creditAccountCode, currency string, amount *big.Int,
+	refType string, refID *uuid.UUID) (*uuid.UUID, error) {
+
+	// Idempotency check
+	if existing, err := s.ledgerRepo.FindEntryByIdempotencyKey(ctx, idempotencyKey); err == nil {
+		return &existing.ID, nil
+	}
+
+	debitAccount, err := s.getOrCreateAccount(ctx, debitAccountCode, currency)
+	if err != nil {
+		ledgerPostingErrors.WithLabelValues(entryType, "account_create").Inc()
+		return nil, fmt.Errorf("resolve debit account %s: %w", debitAccountCode, err)
+	}
+
+	creditAccount, err := s.getOrCreateAccount(ctx, creditAccountCode, currency)
+	if err != nil {
+		ledgerPostingErrors.WithLabelValues(entryType, "account_create").Inc()
+		return nil, fmt.Errorf("resolve credit account %s: %w", creditAccountCode, err)
+	}
+
+	entry := &domain.LedgerEntry{
+		ID:             uuid.New(),
+		IdempotencyKey: idempotencyKey,
+		EntryType:      entryType,
+		Description:    description,
+		State:          domain.EntryPosted,
+		ReferenceType:  &refType,
+		ReferenceID:    refID,
+		Lines: []domain.LedgerLine{
+			{
+				AccountID: debitAccount.ID,
+				Amount:    new(big.Int).Set(amount),
+				Currency:  currency,
+				IsDebit:   true,
+			},
+			{
+				AccountID: creditAccount.ID,
+				Amount:    new(big.Int).Set(amount),
+				Currency:  currency,
+				IsDebit:   false,
+			},
+		},
+	}
+
+	if err := s.ledgerRepo.PostEntry(ctx, entry); err != nil {
+		ledgerPostingErrors.WithLabelValues(entryType, "post").Inc()
+		return nil, fmt.Errorf("post entry: %w", err)
+	}
+
+	ledgerEntriesPosted.WithLabelValues(entryType).Inc()
+	log.Info().
+		Str("entry_id", entry.ID.String()).
+		Str("entry_type", entryType).
+		Str("hash", entry.EntryHash).
+		Msg("fiat ledger entry posted")
+
+	return &entry.ID, nil
+}
+
+// getOrCreateAccount resolves a ledger account by code, creating it if missing
+func (s *LedgerService) getOrCreateAccount(ctx context.Context, code, currency string) (*domain.LedgerAccount, error) {
+	account, err := s.ledgerRepo.FindAccountByCode(ctx, code)
+	if err == nil {
+		return account, nil
+	}
+
+	var accountType domain.LedgerAccountType
+	var name string
+	switch {
+	case strings.HasPrefix(code, "ASSET:"):
+		accountType = domain.AccountAsset
+		name = fmt.Sprintf("Asset %s", code)
+	case strings.HasPrefix(code, "LIABILITY:"):
+		accountType = domain.AccountLiability
+		name = fmt.Sprintf("Liability %s", code)
+	case strings.HasPrefix(code, "REVENUE:"):
+		accountType = domain.AccountRevenue
+		name = fmt.Sprintf("Revenue %s", code)
+	case strings.HasPrefix(code, "EXPENSE:"):
+		accountType = domain.AccountExpense
+		name = fmt.Sprintf("Expense %s", code)
+	default:
+		return nil, fmt.Errorf("unknown account type for code: %s", code)
+	}
+
+	account = &domain.LedgerAccount{
+		ID:       uuid.New(),
+		Code:     code,
+		Name:     name,
+		Type:     accountType,
+		Currency: currency,
+		IsActive: true,
+	}
+	if err := s.ledgerRepo.CreateAccount(ctx, account); err != nil {
+		return nil, err
+	}
+	// Re-fetch in case ON CONFLICT returned existing
+	account, _ = s.ledgerRepo.FindAccountByCode(ctx, code)
+	return account, nil
+}
+
 // GetAccountBalance returns the balance for an account by code
 func (s *LedgerService) GetAccountBalance(ctx context.Context, code string) (*big.Int, error) {
 	account, err := s.ledgerRepo.FindAccountByCode(ctx, code)

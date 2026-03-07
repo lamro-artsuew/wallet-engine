@@ -74,6 +74,7 @@ func main() {
 	rebalanceRepo := repository.NewRebalanceRepo(pool)
 	blacklistRepo := repository.NewBlacklistRepo(pool)
 	velocityRepo := repository.NewVelocityRepo(pool)
+	fiatRepo := repository.NewFiatRepo(pool)
 
 	// Redpanda producer (non-fatal if unavailable)
 	var producer *messaging.RedpandaProducer
@@ -108,13 +109,16 @@ func main() {
 	indexer.SetBlacklistService(blacklistSvc)
 	withdrawalSvc.SetBlacklistService(blacklistSvc)
 
+	// Fiat bridge service
+	fiatBridgeSvc := service.NewFiatBridgeService(fiatRepo, ledgerSvc)
+
 	// HTTP server
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
 
-	h := handler.NewHandler(depositRepo, addrRepo, walletRepo, indexer, addrSvc, withdrawalSvc, ledgerSvc, rebalanceSvc, signer, blacklistSvc, velocitySvc)
+	h := handler.NewHandler(depositRepo, addrRepo, walletRepo, indexer, addrSvc, withdrawalSvc, ledgerSvc, rebalanceSvc, signer, blacklistSvc, velocitySvc, fiatBridgeSvc, fiatRepo)
 	h.RegisterRoutes(r)
 
 	srv := &http.Server{
@@ -169,6 +173,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		"migrations/002_velocity_limits.sql",
 		"migrations/003_blacklist.sql",
 		"migrations/004_rebalance.sql",
+		"migrations/005_fiat_bridge.sql",
 	}
 	altPrefix := "/app/"
 

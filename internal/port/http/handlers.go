@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -26,6 +27,8 @@ type Handler struct {
 	signer         service.Signer
 	blacklistSvc   *service.BlacklistService
 	velocitySvc    *service.VelocityService
+	fiatBridgeSvc  *service.FiatBridgeService
+	fiatRepo       *repository.FiatRepo
 }
 
 // NewHandler creates a new handler
@@ -41,6 +44,8 @@ func NewHandler(
 	signer service.Signer,
 	blacklistSvc *service.BlacklistService,
 	velocitySvc *service.VelocityService,
+	fiatBridgeSvc *service.FiatBridgeService,
+	fiatRepo *repository.FiatRepo,
 ) *Handler {
 	return &Handler{
 		depositRepo:    depositRepo,
@@ -54,6 +59,8 @@ func NewHandler(
 		signer:         signer,
 		blacklistSvc:   blacklistSvc,
 		velocitySvc:    velocitySvc,
+		fiatBridgeSvc:  fiatBridgeSvc,
+		fiatRepo:       fiatRepo,
 	}
 }
 
@@ -113,6 +120,20 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		api.POST("/velocity-limits", h.CreateVelocityLimit)
 		api.PUT("/velocity-limits/:id", h.UpdateVelocityLimit)
 		api.DELETE("/velocity-limits/:id", h.DeleteVelocityLimit)
+
+		// Fiat accounts
+		api.GET("/fiat/accounts", h.ListFiatAccounts)
+		api.POST("/fiat/accounts", h.CreateFiatAccount)
+
+		// Fiat transactions
+		api.POST("/fiat/deposit", h.RecordFiatDeposit)
+		api.POST("/fiat/withdraw", h.RecordFiatWithdrawal)
+		api.GET("/fiat/transactions", h.ListFiatTransactions)
+
+		// Conversions
+		api.POST("/fiat/convert", h.Convert)
+		api.GET("/fiat/rates/:from/:to", h.GetRate)
+		api.POST("/fiat/rates", h.SetRate)
 	}
 }
 
@@ -139,6 +160,12 @@ func (h *Handler) Root(c *gin.Context) {
 			"blacklist":            "GET /api/v1/blacklist, POST /api/v1/blacklist, DELETE /api/v1/blacklist/:id, GET /api/v1/blacklist/check/:chain/:address",
 			"stablecoins":          "GET /api/v1/stablecoins",
 			"velocity_limits":      "GET /api/v1/velocity-limits, POST /api/v1/velocity-limits, PUT /api/v1/velocity-limits/:id, DELETE /api/v1/velocity-limits/:id",
+			"fiat_accounts":        "GET /api/v1/fiat/accounts, POST /api/v1/fiat/accounts",
+			"fiat_deposit":         "POST /api/v1/fiat/deposit",
+			"fiat_withdraw":        "POST /api/v1/fiat/withdraw",
+			"fiat_transactions":    "GET /api/v1/fiat/transactions",
+			"fiat_convert":         "POST /api/v1/fiat/convert",
+			"fiat_rates":           "GET /api/v1/fiat/rates/:from/:to, POST /api/v1/fiat/rates",
 		},
 	})
 }
@@ -971,4 +998,295 @@ func (h *Handler) DeleteVelocityLimit(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "removed"})
+}
+
+// --- Fiat Bridge Handlers ---
+
+// CreateFiatAccountRequest is the request body for creating a fiat account
+type CreateFiatAccountRequest struct {
+	WorkspaceID       string `json:"workspace_id" binding:"required"`
+	Currency          string `json:"currency" binding:"required"`
+	Provider          string `json:"provider" binding:"required"`
+	ProviderAccountID string `json:"provider_account_id"`
+	AccountType       string `json:"account_type" binding:"required"`
+}
+
+// CreateFiatAccount creates a new fiat account
+func (h *Handler) CreateFiatAccount(c *gin.Context) {
+	var req CreateFiatAccountRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	workspaceID, err := uuid.Parse(req.WorkspaceID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workspace_id"})
+		return
+	}
+
+	validTypes := map[string]bool{"OPERATING": true, "CLIENT_FUNDS": true, "SETTLEMENT": true, "FEE_COLLECTION": true}
+	if !validTypes[req.AccountType] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "account_type must be one of: OPERATING, CLIENT_FUNDS, SETTLEMENT, FEE_COLLECTION"})
+		return
+	}
+
+	var providerAccountID *string
+	if req.ProviderAccountID != "" {
+		providerAccountID = &req.ProviderAccountID
+	}
+
+	account := &domain.FiatAccount{
+		ID:                uuid.New(),
+		WorkspaceID:       workspaceID,
+		Currency:          strings.ToUpper(req.Currency),
+		Provider:          strings.ToUpper(req.Provider),
+		ProviderAccountID: providerAccountID,
+		AccountType:       req.AccountType,
+		Balance:           0,
+		IsActive:          true,
+	}
+
+	if err := h.fiatRepo.CreateFiatAccount(c.Request.Context(), account); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, account)
+}
+
+// ListFiatAccounts returns fiat accounts for a workspace
+func (h *Handler) ListFiatAccounts(c *gin.Context) {
+	workspaceIDStr := c.Query("workspace_id")
+	if workspaceIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workspace_id query parameter required"})
+		return
+	}
+
+	workspaceID, err := uuid.Parse(workspaceIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workspace_id"})
+		return
+	}
+
+	accounts, err := h.fiatRepo.ListFiatAccounts(c.Request.Context(), workspaceID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if accounts == nil {
+		accounts = []*domain.FiatAccount{}
+	}
+	c.JSON(http.StatusOK, accounts)
+}
+
+// FiatDepositRequest is the request body for recording a fiat deposit
+type FiatDepositRequest struct {
+	WorkspaceID string  `json:"workspace_id" binding:"required"`
+	Currency    string  `json:"currency" binding:"required"`
+	Amount      float64 `json:"amount" binding:"required"`
+	Reference   string  `json:"reference"`
+}
+
+// RecordFiatDeposit handles POST /fiat/deposit
+func (h *Handler) RecordFiatDeposit(c *gin.Context) {
+	var req FiatDepositRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	workspaceID, err := uuid.Parse(req.WorkspaceID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workspace_id"})
+		return
+	}
+
+	if req.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be positive"})
+		return
+	}
+
+	tx, err := h.fiatBridgeSvc.RecordFiatDeposit(c.Request.Context(), workspaceID, req.Currency, req.Amount, req.Reference)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, tx)
+}
+
+// FiatWithdrawalRequest is the request body for recording a fiat withdrawal
+type FiatWithdrawalRequest struct {
+	WorkspaceID string  `json:"workspace_id" binding:"required"`
+	Currency    string  `json:"currency" binding:"required"`
+	Amount      float64 `json:"amount" binding:"required"`
+	Reference   string  `json:"reference"`
+}
+
+// RecordFiatWithdrawal handles POST /fiat/withdraw
+func (h *Handler) RecordFiatWithdrawal(c *gin.Context) {
+	var req FiatWithdrawalRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	workspaceID, err := uuid.Parse(req.WorkspaceID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workspace_id"})
+		return
+	}
+
+	if req.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be positive"})
+		return
+	}
+
+	tx, err := h.fiatBridgeSvc.RecordFiatWithdrawal(c.Request.Context(), workspaceID, req.Currency, req.Amount, req.Reference)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, tx)
+}
+
+// ListFiatTransactions returns fiat transactions for a workspace
+func (h *Handler) ListFiatTransactions(c *gin.Context) {
+	workspaceIDStr := c.Query("workspace_id")
+	if workspaceIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workspace_id query parameter required"})
+		return
+	}
+
+	workspaceID, err := uuid.Parse(workspaceIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workspace_id"})
+		return
+	}
+
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if limit > 100 {
+		limit = 100
+	}
+
+	txs, err := h.fiatRepo.ListTransactions(c.Request.Context(), workspaceID, limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if txs == nil {
+		txs = []*domain.FiatTransaction{}
+	}
+	c.JSON(http.StatusOK, txs)
+}
+
+// ConvertRequest is the request body for currency conversion
+type ConvertRequest struct {
+	WorkspaceID  string  `json:"workspace_id" binding:"required"`
+	FromCurrency string  `json:"from_currency" binding:"required"`
+	ToCurrency   string  `json:"to_currency" binding:"required"`
+	Amount       float64 `json:"amount" binding:"required"`
+	Direction    string  `json:"direction" binding:"required"`
+}
+
+// Convert handles POST /fiat/convert
+func (h *Handler) Convert(c *gin.Context) {
+	var req ConvertRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	workspaceID, err := uuid.Parse(req.WorkspaceID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid workspace_id"})
+		return
+	}
+
+	if req.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be positive"})
+		return
+	}
+
+	if req.Direction != "BUY" && req.Direction != "SELL" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "direction must be BUY or SELL"})
+		return
+	}
+
+	convReq := domain.ConversionRequest{
+		WorkspaceID:  workspaceID,
+		FromCurrency: req.FromCurrency,
+		ToCurrency:   req.ToCurrency,
+		Amount:       req.Amount,
+		Direction:    req.Direction,
+	}
+
+	var tx *domain.FiatTransaction
+	if req.Direction == "SELL" {
+		tx, err = h.fiatBridgeSvc.ConvertCryptoToFiat(c.Request.Context(), convReq)
+	} else {
+		tx, err = h.fiatBridgeSvc.ConvertFiatToCrypto(c.Request.Context(), convReq)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, tx)
+}
+
+// GetRate returns the latest conversion rate for a currency pair
+func (h *Handler) GetRate(c *gin.Context) {
+	from := c.Param("from")
+	to := c.Param("to")
+
+	rate, err := h.fiatBridgeSvc.GetRate(c.Request.Context(), from, to)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, rate)
+}
+
+// SetRateRequest is the request body for setting a conversion rate
+type SetRateRequest struct {
+	FromCurrency string  `json:"from_currency" binding:"required"`
+	ToCurrency   string  `json:"to_currency" binding:"required"`
+	Rate         float64 `json:"rate" binding:"required"`
+	Source       string  `json:"source"`
+}
+
+// SetRate sets a conversion rate
+func (h *Handler) SetRate(c *gin.Context) {
+	var req SetRateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Rate <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "rate must be positive"})
+		return
+	}
+
+	source := req.Source
+	if source == "" {
+		source = "MANUAL"
+	}
+
+	if err := h.fiatBridgeSvc.SetRate(c.Request.Context(), req.FromCurrency, req.ToCurrency, req.Rate, source); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"status": "rate set",
+		"from":   strings.ToUpper(req.FromCurrency),
+		"to":     strings.ToUpper(req.ToCurrency),
+		"rate":   req.Rate,
+	})
 }
