@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS deposit_addresses (
     UNIQUE(chain, address),
     UNIQUE(chain, derivation_index)
 );
-CREATE INDEX idx_deposit_addresses_user ON deposit_addresses(user_id, chain);
-CREATE INDEX idx_deposit_addresses_workspace ON deposit_addresses(workspace_id, chain);
+CREATE INDEX IF NOT EXISTS idx_deposit_addresses_user ON deposit_addresses(user_id, chain);
+CREATE INDEX IF NOT EXISTS idx_deposit_addresses_workspace ON deposit_addresses(workspace_id, chain);
 
 -- Deposits detected on-chain
 CREATE TABLE IF NOT EXISTS deposits (
@@ -70,11 +70,11 @@ CREATE TABLE IF NOT EXISTS deposits (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_deposits_chain_state ON deposits(chain, state);
-CREATE INDEX idx_deposits_user ON deposits(user_id, chain);
-CREATE INDEX idx_deposits_workspace ON deposits(workspace_id);
-CREATE INDEX idx_deposits_block ON deposits(chain, block_number);
-CREATE INDEX idx_deposits_tx ON deposits(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_deposits_chain_state ON deposits(chain, state);
+CREATE INDEX IF NOT EXISTS idx_deposits_user ON deposits(user_id, chain);
+CREATE INDEX IF NOT EXISTS idx_deposits_workspace ON deposits(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_deposits_block ON deposits(chain, block_number);
+CREATE INDEX IF NOT EXISTS idx_deposits_tx ON deposits(tx_hash);
 
 -- Withdrawals (outbound transfers)
 CREATE TABLE IF NOT EXISTS withdrawals (
@@ -111,10 +111,10 @@ CREATE TABLE IF NOT EXISTS withdrawals (
     broadcast_at        TIMESTAMPTZ,
     confirmed_at        TIMESTAMPTZ
 );
-CREATE INDEX idx_withdrawals_chain_state ON withdrawals(chain, state);
-CREATE INDEX idx_withdrawals_user ON withdrawals(user_id);
-CREATE INDEX idx_withdrawals_workspace ON withdrawals(workspace_id);
-CREATE INDEX idx_withdrawals_tx ON withdrawals(tx_hash);
+CREATE INDEX IF NOT EXISTS idx_withdrawals_chain_state ON withdrawals(chain, state);
+CREATE INDEX IF NOT EXISTS idx_withdrawals_user ON withdrawals(user_id);
+CREATE INDEX IF NOT EXISTS idx_withdrawals_workspace ON withdrawals(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_withdrawals_tx ON withdrawals(tx_hash);
 
 -- Double-entry ledger accounts
 CREATE TABLE IF NOT EXISTS ledger_accounts (
@@ -142,8 +142,8 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
     entry_hash      TEXT NOT NULL DEFAULT '',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_ledger_entries_type ON ledger_entries(entry_type);
-CREATE INDEX idx_ledger_entries_ref ON ledger_entries(reference_type, reference_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_entries_type ON ledger_entries(entry_type);
+CREATE INDEX IF NOT EXISTS idx_ledger_entries_ref ON ledger_entries(reference_type, reference_id);
 
 -- Journal lines (debits & credits within an entry)
 CREATE TABLE IF NOT EXISTS ledger_lines (
@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS ledger_lines (
     sequence        INT NOT NULL DEFAULT 0,
     UNIQUE(entry_id, sequence)
 );
-CREATE INDEX idx_ledger_lines_account ON ledger_lines(account_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_lines_account ON ledger_lines(account_id);
 
 -- WORM enforcement: prevent UPDATE/DELETE on ledger_entries and ledger_lines
 CREATE OR REPLACE FUNCTION prevent_ledger_mutation() RETURNS TRIGGER AS $$
@@ -165,11 +165,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER trg_ledger_entries_worm
+CREATE OR REPLACE TRIGGER trg_ledger_entries_worm
     BEFORE UPDATE OR DELETE ON ledger_entries
     FOR EACH ROW EXECUTE FUNCTION prevent_ledger_mutation();
 
-CREATE TRIGGER trg_ledger_lines_worm
+CREATE OR REPLACE TRIGGER trg_ledger_lines_worm
     BEFORE UPDATE OR DELETE ON ledger_lines
     FOR EACH ROW EXECUTE FUNCTION prevent_ledger_mutation();
 
@@ -196,7 +196,7 @@ CREATE TABLE IF NOT EXISTS sweeps (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     confirmed_at    TIMESTAMPTZ
 );
-CREATE INDEX idx_sweeps_chain_state ON sweeps(chain, state);
+CREATE INDEX IF NOT EXISTS idx_sweeps_chain_state ON sweeps(chain, state);
 
 -- Seed default ledger accounts for each supported chain
 INSERT INTO ledger_accounts (code, name, type, chain, currency) VALUES
