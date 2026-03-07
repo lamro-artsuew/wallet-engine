@@ -112,6 +112,29 @@ func (r *DepositRepo) FindByWorkspace(ctx context.Context, workspaceID uuid.UUID
 	return scanDeposits(rows)
 }
 
+// FindByID returns a single deposit by ID
+func (r *DepositRepo) FindByID(ctx context.Context, id uuid.UUID) (*domain.Deposit, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, idempotency_key, chain, tx_hash, log_index, block_number, block_hash,
+			from_address, to_address, token_address, token_symbol, amount, decimals,
+			state, confirmations, required_confirmations, deposit_address_id,
+			workspace_id, user_id, detected_at, confirmed_at, swept_at, created_at, updated_at
+		FROM deposits WHERE id = $1
+	`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	deposits, err := scanDeposits(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(deposits) == 0 {
+		return nil, fmt.Errorf("deposit %s not found", id)
+	}
+	return deposits[0], nil
+}
+
 func scanDeposits(rows pgx.Rows) ([]*domain.Deposit, error) {
 	var deposits []*domain.Deposit
 	for rows.Next() {

@@ -69,6 +69,8 @@ func main() {
 	walletRepo := repository.NewWalletRepo(pool)
 	indexRepo := repository.NewChainIndexRepo(pool)
 	hdRepo := repository.NewHDDerivationRepo(pool)
+	withdrawalRepo := repository.NewWithdrawalRepo(pool)
+	ledgerRepo := repository.NewLedgerRepo(pool)
 
 	// Redpanda producer (non-fatal if unavailable)
 	var producer *messaging.RedpandaProducer
@@ -81,6 +83,10 @@ func main() {
 	// In production: fetch from Vault at vault:secret/wallet-engine/master-seed
 	masterSeed := []byte(envStr("MASTER_SEED", "DEVELOPMENT-SEED-DO-NOT-USE-IN-PRODUCTION"))
 	addrSvc := service.NewAddressService(addrRepo, hdRepo, masterSeed)
+
+	// Ledger and withdrawal services
+	ledgerSvc := service.NewLedgerService(ledgerRepo)
+	withdrawalSvc := service.NewWithdrawalService(withdrawalRepo, walletRepo, ledgerSvc, producer)
 
 	// Deposit indexer
 	indexer := service.NewDepositIndexer(cfg.Chains, depositRepo, addrRepo, indexRepo, producer)
@@ -95,7 +101,7 @@ func main() {
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
 
-	h := handler.NewHandler(depositRepo, addrRepo, walletRepo, indexer, addrSvc)
+	h := handler.NewHandler(depositRepo, addrRepo, walletRepo, indexer, addrSvc, withdrawalSvc, ledgerSvc)
 	h.RegisterRoutes(r)
 
 	srv := &http.Server{
