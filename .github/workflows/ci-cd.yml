@@ -90,7 +90,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ github.token }}
+          ref: master
+          fetch-depth: 0
 
       - name: Update K8s image tag
         run: |
