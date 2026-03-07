@@ -30,7 +30,7 @@ spec:
         - name: harbor-registry
       containers:
         - name: wallet-engine
-          image: harbor.157.180.105.202.nip.io/osonx/wallet-engine:sha-e605c0ab
+          image: harbor.157.180.105.202.nip.io/osonx/wallet-engine:sha-5d96ceb2
           ports:
             - containerPort: 8080
               name: http
