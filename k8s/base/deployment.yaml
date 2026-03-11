@@ -67,6 +67,8 @@ spec:
               value: "http://optimism.blockchain.svc:8545"
             - name: AVALANCHE_RPC_URL
               value: "http://avalanche.blockchain.svc:9650/ext/bc/C/rpc"
+            - name: TRON_RPC_URL
+              value: "http://tron.blockchain.svc:8090"
           resources:
             requests:
               cpu: 250m
