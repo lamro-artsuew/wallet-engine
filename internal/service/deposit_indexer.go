@@ -279,6 +279,10 @@ func (di *DepositIndexer) runChainIndexer(ctx context.Context, ci *chainIndexer)
 				Int64("skipped", lag).
 				Msg("indexer too far behind, fast-forwarding to near chain head")
 			currentBlock = newStart
+			// Persist fast-forward position immediately so other replicas see it
+			if uerr := di.indexRepo.UpsertState(ctx, ci.cfg.Name, currentBlock, "fast-forward"); uerr != nil {
+				ci.logger.Error().Err(uerr).Msg("failed to persist fast-forward position")
+			}
 		}
 
 		// Calculate lag
@@ -299,10 +303,13 @@ func (di *DepositIndexer) runChainIndexer(ctx context.Context, ci *chainIndexer)
 			default:
 			}
 
-			if err := di.processBlock(ctx, ci, uint64(currentBlock)); err != nil {
+			// Use a timeout for individual block processing to avoid hanging on stalled RPC
+			blockCtx, blockCancel := context.WithTimeout(ctx, 30*time.Second)
+			err := di.processBlock(blockCtx, ci, uint64(currentBlock))
+			blockCancel()
+			if err != nil {
 				indexerErrors.WithLabelValues(ci.cfg.Name, "process_block").Inc()
 				ci.logger.Error().Err(err).Int64("block", currentBlock).Msg("failed to process block")
-				// Back off on error but don't skip the block
 				time.Sleep(2 * time.Second)
 				break
 			}
