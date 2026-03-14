@@ -729,18 +729,19 @@ func (h *Handler) GetAccountBalance(c *gin.Context) {
 
 // VerifyLedgerIntegrity verifies the hash chain integrity
 func (h *Handler) VerifyLedgerIntegrity(c *gin.Context) {
-	count, err := h.ledgerSvc.VerifyIntegrity(c.Request.Context())
+	result, err := h.ledgerSvc.VerifyIntegrity(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"intact":  false,
-			"error":   err.Error(),
-			"entries": count,
+			"intact": false,
+			"error":  err.Error(),
 		})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"intact":  true,
-		"entries": count,
+		"intact":           result.Valid,
+		"entries_checked":  result.TotalChecked,
+		"first_failure_id": result.FirstFailureID,
+		"failure_reason":   result.FailureReason,
 	})
 }
 

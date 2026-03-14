@@ -59,6 +59,26 @@ func (r *LedgerRepo) CreateAccount(ctx context.Context, a *domain.LedgerAccount)
 	return err
 }
 
+// FindOrCreateAccount atomically finds or creates a ledger account, returning
+// the persisted account regardless of which path was taken. Eliminates race
+// conditions where two goroutines create the same account code concurrently.
+func (r *LedgerRepo) FindOrCreateAccount(ctx context.Context, a *domain.LedgerAccount) (*domain.LedgerAccount, error) {
+	result := &domain.LedgerAccount{}
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO ledger_accounts (id, code, name, type, chain, currency, parent_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (code) DO UPDATE SET code = EXCLUDED.code
+		RETURNING id, code, name, type, chain, currency, parent_id, is_active, created_at
+	`, a.ID, a.Code, a.Name, string(a.Type), a.Chain, a.Currency, a.ParentID).Scan(
+		&result.ID, &result.Code, &result.Name, &result.Type, &result.Chain,
+		&result.Currency, &result.ParentID, &result.IsActive, &result.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find or create account %s: %w", a.Code, err)
+	}
+	return result, nil
+}
+
 // PostEntry creates a journal entry with its lines in a single transaction.
 // Uses SELECT FOR UPDATE on ledger_chain_head to prevent hash chain forks
 // under concurrent writes. Hash is computed using deterministic binary encoding.
@@ -351,29 +371,34 @@ func (r *LedgerRepo) ListEntries(ctx context.Context, limit, offset int) ([]*dom
 
 // VerifyHashChain verifies the integrity of the ledger hash chain
 // by recomputing each entry's hash and verifying the chain links.
-func (r *LedgerRepo) VerifyHashChain(ctx context.Context) (int, error) {
+// Returns a structured IntegrityResult for auditors and operators.
+func (r *LedgerRepo) VerifyHashChain(ctx context.Context) (*domain.IntegrityResult, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT e.id, e.entry_type, e.previous_hash, e.entry_hash
 		FROM ledger_entries e ORDER BY e.created_at ASC
 	`)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer rows.Close()
 
-	count := 0
+	result := &domain.IntegrityResult{Valid: true}
 	lastHash := "GENESIS"
 	for rows.Next() {
 		var id uuid.UUID
 		var entryType, prevHash, storedHash string
 		if err := rows.Scan(&id, &entryType, &prevHash, &storedHash); err != nil {
-			return count, err
+			return result, err
 		}
 		if prevHash != lastHash {
-			return count, fmt.Errorf("hash chain broken at entry %s: expected previous=%s, got=%s", id, lastHash, prevHash)
+			failID := id
+			result.Valid = false
+			result.FirstFailureID = &failID
+			result.FailureReason = fmt.Sprintf("hash chain broken: expected previous=%s, got=%s", lastHash, prevHash)
+			return result, nil
 		}
 		lastHash = storedHash
-		count++
+		result.TotalChecked++
 	}
-	return count, rows.Err()
+	return result, rows.Err()
 }

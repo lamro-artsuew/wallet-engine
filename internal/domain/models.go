@@ -193,6 +193,14 @@ type LedgerLine struct {
 	Sequence  int       `json:"sequence" db:"sequence"`
 }
 
+// IntegrityResult is the structured output of a ledger hash chain verification
+type IntegrityResult struct {
+	TotalChecked   int        `json:"total_checked"`
+	Valid          bool       `json:"valid"`
+	FirstFailureID *uuid.UUID `json:"first_failure_id,omitempty"`
+	FailureReason  string     `json:"failure_reason,omitempty"`
+}
+
 // ChainIndexState tracks the last processed block per chain
 type ChainIndexState struct {
 	Chain           string    `json:"chain" db:"chain"`
