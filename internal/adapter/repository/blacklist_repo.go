@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lamro-artsuew/wallet-engine/internal/domain"
 )
@@ -20,9 +21,22 @@ func NewBlacklistRepo(pool *pgxpool.Pool) *BlacklistRepo {
 	return &BlacklistRepo{pool: pool}
 }
 
-// IsBlacklisted checks if an address is actively blacklisted and returns matching entries.
-// Addresses are stored in normalized lowercase form; query also lowercases for safety.
-func (r *BlacklistRepo) IsBlacklisted(ctx context.Context, chain string, address string) ([]*domain.BlacklistedAddress, error) {
+// IsBlacklisted returns true if the address is actively blacklisted.
+// Uses SELECT EXISTS for minimal data transfer on the compliance hot path.
+func (r *BlacklistRepo) IsBlacklisted(ctx context.Context, chain string, address string) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM blacklisted_addresses
+			WHERE chain = $1 AND address = lower($2) AND is_active = TRUE
+		)
+	`, chain, address).Scan(&exists)
+	return exists, err
+}
+
+// GetBlacklistEntries returns detail for all active blacklist entries matching an address.
+// Use for audit/admin views where source, reason, and timestamps are needed.
+func (r *BlacklistRepo) GetBlacklistEntries(ctx context.Context, chain string, address string) ([]*domain.BlacklistedAddress, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, chain, address, source, reason, detected_at, is_active, created_at, updated_at
 		FROM blacklisted_addresses
@@ -150,11 +164,7 @@ func (r *BlacklistRepo) GetAllStablecoinContracts(ctx context.Context) ([]*domai
 	return scanStablecoinContracts(rows)
 }
 
-func scanStablecoinContracts(rows interface {
-	Next() bool
-	Scan(dest ...interface{}) error
-	Err() error
-}) ([]*domain.StablecoinContract, error) {
+func scanStablecoinContracts(rows pgx.Rows) ([]*domain.StablecoinContract, error) {
 	var contracts []*domain.StablecoinContract
 	for rows.Next() {
 		c := &domain.StablecoinContract{}

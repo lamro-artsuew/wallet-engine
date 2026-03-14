@@ -79,8 +79,8 @@ func (s *BlacklistService) CheckAddress(ctx context.Context, chainName string, a
 		address = strings.ToLower(address)
 	}
 
-	// 1. Check local blacklist DB (primary source)
-	entries, err := s.blacklistRepo.IsBlacklisted(ctx, chainName, address)
+	// 1. Check local blacklist DB (primary source — detail needed for sources/reasons)
+	entries, err := s.blacklistRepo.GetBlacklistEntries(ctx, chainName, address)
 	if err != nil {
 		return nil, fmt.Errorf("check blacklist DB: %w", err)
 	}
