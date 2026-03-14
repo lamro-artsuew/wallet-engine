@@ -101,14 +101,22 @@ func main() {
 	// Ledger and withdrawal services
 	ledgerSvc := service.NewLedgerService(ledgerRepo)
 	velocitySvc := service.NewVelocityService(velocityRepo, withdrawalRepo)
-	withdrawalSvc := service.NewWithdrawalService(withdrawalRepo, walletRepo, ledgerSvc, producer, nil, velocitySvc)
+
+	// Deposit indexer (create early — need EVM adapters for blacklist service)
+	indexer := service.NewDepositIndexer(cfg.Chains, depositRepo, addrRepo, indexRepo, producer)
+
+	// Blacklist service (needs EVM adapters from indexer — created before Start)
+	blacklistSvc := service.NewBlacklistService(blacklistRepo, indexer.GetEVMAdapters())
+	indexer.SetBlacklistService(blacklistSvc)
+
+	// Withdrawal service (blacklist + velocity injected via interfaces, never nil)
+	withdrawalSvc := service.NewWithdrawalService(withdrawalRepo, walletRepo, ledgerSvc, producer, blacklistSvc, velocitySvc)
 	rebalanceSvc := service.NewRebalanceService(rebalanceRepo, walletRepo, ledgerSvc)
 
 	// Signer (MPC/HSM/local key management)
 	signer := service.NewSigner(cfg.Signer, walletRepo)
 
-	// Deposit indexer (gated by feature flag)
-	indexer := service.NewDepositIndexer(cfg.Chains, depositRepo, addrRepo, indexRepo, producer)
+	// Start deposit indexer (gated by feature flag)
 	if cfg.Features.IndexerEnabled {
 		if err := indexer.Start(ctx); err != nil {
 			log.Fatal().Err(err).Msg("failed to start deposit indexer")
@@ -117,11 +125,6 @@ func main() {
 	} else {
 		log.Warn().Msg("deposit indexer disabled by feature flag")
 	}
-
-	// Blacklist service (needs EVM adapters from indexer)
-	blacklistSvc := service.NewBlacklistService(blacklistRepo, indexer.GetEVMAdapters())
-	indexer.SetBlacklistService(blacklistSvc)
-	withdrawalSvc.SetBlacklistService(blacklistSvc)
 
 	// Fiat bridge service
 	fiatBridgeSvc := service.NewFiatBridgeService(fiatRepo, ledgerSvc)

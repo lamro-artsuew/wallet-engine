@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/lamro-artsuew/wallet-engine/internal/adapter/messaging"
 	"github.com/lamro-artsuew/wallet-engine/internal/adapter/repository"
 	"github.com/lamro-artsuew/wallet-engine/internal/domain"
@@ -14,6 +16,18 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/rs/zerolog/log"
 )
+
+// AddressChecker checks addresses against blacklists (OFAC, custom).
+// Implemented by BlacklistService; inject via constructor, never nil in production.
+type AddressChecker interface {
+	CheckAddress(ctx context.Context, chain, address string) (*domain.BlacklistCheckResult, error)
+}
+
+// VelocityChecker enforces withdrawal rate limits and geo restrictions.
+// Implemented by VelocityService; inject via constructor, never nil in production.
+type VelocityChecker interface {
+	CheckWithdrawal(ctx context.Context, w *domain.Withdrawal, sourceIP, countryCode string) (*domain.VelocityCheckResult, error)
+}
 
 var (
 	withdrawalsCreated = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -49,18 +63,20 @@ type WithdrawalService struct {
 	walletRepo     *repository.WalletRepo
 	ledgerSvc      *LedgerService
 	producer       *messaging.RedpandaProducer
-	blacklistSvc   *BlacklistService
-	velocitySvc    *VelocityService
+	blacklistSvc   AddressChecker
+	velocitySvc    VelocityChecker
 }
 
-// NewWithdrawalService creates a new withdrawal service
+// NewWithdrawalService creates a new withdrawal service.
+// blacklistSvc and velocitySvc are mandatory compliance checks — pass NoOp
+// implementations for tests, never nil in production.
 func NewWithdrawalService(
 	withdrawalRepo *repository.WithdrawalRepo,
 	walletRepo *repository.WalletRepo,
 	ledgerSvc *LedgerService,
 	producer *messaging.RedpandaProducer,
-	blacklistSvc *BlacklistService,
-	velocitySvc *VelocityService,
+	blacklistSvc AddressChecker,
+	velocitySvc VelocityChecker,
 ) *WithdrawalService {
 	return &WithdrawalService{
 		withdrawalRepo: withdrawalRepo,
@@ -70,11 +86,6 @@ func NewWithdrawalService(
 		blacklistSvc:   blacklistSvc,
 		velocitySvc:    velocitySvc,
 	}
-}
-
-// SetBlacklistService sets the blacklist service (used for late initialization)
-func (s *WithdrawalService) SetBlacklistService(svc *BlacklistService) {
-	s.blacklistSvc = svc
 }
 
 // CreateWithdrawalRequest holds the data for creating a withdrawal
@@ -94,10 +105,14 @@ type CreateWithdrawalRequest struct {
 
 // CreateWithdrawal initiates a new withdrawal request
 func (s *WithdrawalService) CreateWithdrawal(ctx context.Context, req CreateWithdrawalRequest) (*domain.Withdrawal, error) {
-	// Idempotency check
-	if existing, err := s.withdrawalRepo.FindByIdempotencyKey(ctx, req.IdempotencyKey); err == nil {
+	// Idempotency check — distinguish "not found" from DB failure
+	existing, err := s.withdrawalRepo.FindByIdempotencyKey(ctx, req.IdempotencyKey)
+	if err == nil {
 		log.Info().Str("id", existing.ID.String()).Msg("duplicate withdrawal request, returning existing")
 		return existing, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("idempotency check: %w", err)
 	}
 
 	// Validate destination address
@@ -105,35 +120,52 @@ func (s *WithdrawalService) CreateWithdrawal(ctx context.Context, req CreateWith
 		return nil, fmt.Errorf("invalid destination address %s for chain %s", req.ToAddress, req.Chain)
 	}
 
-	// Check destination against blacklist
-	if s.blacklistSvc != nil {
-		result, err := s.blacklistSvc.CheckAddress(ctx, req.Chain, req.ToAddress)
-		if err != nil {
-			return nil, fmt.Errorf("blacklist check failed: %w", err)
-		}
-		if result.IsBlacklisted {
-			return nil, fmt.Errorf("destination address %s is blacklisted (sources: %s)",
-				req.ToAddress, strings.Join(result.Sources, ", "))
-		}
+	// Blacklist check — mandatory, fail-closed
+	if s.blacklistSvc == nil {
+		return nil, fmt.Errorf("blacklist checker not configured — refusing withdrawal (fail-closed)")
+	}
+	result, err := s.blacklistSvc.CheckAddress(ctx, req.Chain, req.ToAddress)
+	if err != nil {
+		return nil, fmt.Errorf("blacklist check failed: %w", err)
+	}
+	if result.IsBlacklisted {
+		log.Warn().
+			Str("chain", req.Chain).
+			Str("address", req.ToAddress).
+			Str("user_id", req.UserID.String()).
+			Strs("sources", result.Sources).
+			Msg("withdrawal rejected: blacklisted destination")
+		return nil, fmt.Errorf("destination address %s is blacklisted (sources: %s)",
+			req.ToAddress, strings.Join(result.Sources, ", "))
 	}
 
-	// Velocity check — enforce rate limits and geo restrictions before creating the withdrawal
-	if s.velocitySvc != nil {
-		preCheck := &domain.Withdrawal{
-			ID:          uuid.New(),
-			WorkspaceID: req.WorkspaceID,
-			UserID:      req.UserID,
-			Chain:       req.Chain,
-			TokenSymbol: req.TokenSymbol,
-			Amount:      req.Amount,
-		}
-		velocityResult, err := s.velocitySvc.CheckWithdrawal(ctx, preCheck, req.SourceIP, req.CountryCode)
-		if err != nil {
-			return nil, fmt.Errorf("velocity check failed: %w", err)
-		}
-		if !velocityResult.Allowed {
-			return nil, fmt.Errorf("velocity check rejected: %s", velocityResult.RejectionReason)
-		}
+	// Velocity check — mandatory, fail-closed
+	if s.velocitySvc == nil {
+		return nil, fmt.Errorf("velocity checker not configured — refusing withdrawal (fail-closed)")
+	}
+	preCheck := &domain.Withdrawal{
+		ID:          uuid.New(),
+		WorkspaceID: req.WorkspaceID,
+		UserID:      req.UserID,
+		Chain:       req.Chain,
+		TokenSymbol: req.TokenSymbol,
+		Amount:      req.Amount,
+	}
+	velocityResult, err := s.velocitySvc.CheckWithdrawal(ctx, preCheck, req.SourceIP, req.CountryCode)
+	if err != nil {
+		return nil, fmt.Errorf("velocity check failed: %w", err)
+	}
+	if !velocityResult.Allowed {
+		log.Warn().
+			Str("chain", req.Chain).
+			Str("user_id", req.UserID.String()).
+			Str("workspace_id", req.WorkspaceID.String()).
+			Str("token", req.TokenSymbol).
+			Str("amount", req.Amount.String()).
+			Str("reason", velocityResult.RejectionReason).
+			Strs("rules", velocityResult.ApplicableRules).
+			Msg("withdrawal rejected: velocity limit exceeded")
+		return nil, fmt.Errorf("velocity check rejected: %s", velocityResult.RejectionReason)
 	}
 
 	// Find hot wallet for the chain
@@ -143,8 +175,11 @@ func (s *WithdrawalService) CreateWithdrawal(ctx context.Context, req CreateWith
 	}
 	sourceWallet := hotWallets[0]
 
-	// Determine required confirmations based on chain
-	requiredConfs := chainConfirmations(req.Chain)
+	// Determine required confirmations — unknown chain is an error
+	requiredConfs, err := chainConfirmations(req.Chain)
+	if err != nil {
+		return nil, fmt.Errorf("create withdrawal: %w", err)
+	}
 
 	w := &domain.Withdrawal{
 		ID:             uuid.New(),
@@ -184,7 +219,9 @@ func (s *WithdrawalService) CreateWithdrawal(ctx context.Context, req CreateWith
 	return w, nil
 }
 
-// TransitionState moves a withdrawal to a new state with validation
+// TransitionState moves a withdrawal to a new state with validation.
+// For CONFIRMED: posts the ledger entry BEFORE the state transition (idempotent —
+// safe to retry). The DB enforces atomic from-state via WHERE state = $fromState.
 func (s *WithdrawalService) TransitionState(ctx context.Context, id uuid.UUID, newState domain.WithdrawalState, errorMsg *string) error {
 	w, err := s.withdrawalRepo.FindByID(ctx, id)
 	if err != nil {
@@ -193,6 +230,17 @@ func (s *WithdrawalService) TransitionState(ctx context.Context, id uuid.UUID, n
 
 	if !isValidTransition(w.State, newState) {
 		return fmt.Errorf("invalid state transition: %s → %s", w.State, newState)
+	}
+
+	// Post ledger entry BEFORE transitioning to CONFIRMED.
+	// PostWithdrawalEntry is idempotent (keyed on withdrawal ID) — safe if retried.
+	if newState == domain.WithdrawalConfirmed {
+		if s.ledgerSvc == nil {
+			return fmt.Errorf("ledger service not configured — cannot confirm withdrawal")
+		}
+		if err := s.ledgerSvc.PostWithdrawalEntry(ctx, w); err != nil {
+			return fmt.Errorf("post confirmation ledger entry for %s: %w", id, err)
+		}
 	}
 
 	if err := s.withdrawalRepo.UpdateState(ctx, id, w.State, newState, errorMsg); err != nil {
@@ -207,16 +255,7 @@ func (s *WithdrawalService) TransitionState(ctx context.Context, id uuid.UUID, n
 		Str("to", string(newState)).
 		Msg("withdrawal state transition")
 
-	// Post ledger entry on confirmation
-	if newState == domain.WithdrawalConfirmed && s.ledgerSvc != nil {
-		// Refresh to get updated fields
-		w, _ = s.withdrawalRepo.FindByID(ctx, id)
-		if err := s.ledgerSvc.PostWithdrawalEntry(ctx, w); err != nil {
-			log.Error().Err(err).Str("id", id.String()).Msg("failed to post withdrawal ledger entry")
-		}
-	}
-
-	// Publish state change
+	// Publish state change (fire-and-forget — internal logging on failure)
 	if s.producer != nil {
 		w.State = newState
 		s.producer.PublishWithdrawal(ctx, w)
@@ -263,23 +302,23 @@ func isValidTransition(from, to domain.WithdrawalState) bool {
 	return false
 }
 
-func chainConfirmations(chain string) int {
+func chainConfirmations(chain string) (int, error) {
 	switch strings.ToLower(chain) {
 	case "ethereum":
-		return 12
+		return 12, nil
 	case "bsc":
-		return 15
+		return 15, nil
 	case "polygon":
-		return 64
+		return 64, nil
 	case "arbitrum":
-		return 10
+		return 10, nil
 	case "optimism":
-		return 10
+		return 10, nil
 	case "avalanche":
-		return 12
+		return 12, nil
 	case "tron":
-		return 19
+		return 19, nil
 	default:
-		return 12
+		return 0, fmt.Errorf("unknown chain %q: cannot determine confirmation count", chain)
 	}
 }
