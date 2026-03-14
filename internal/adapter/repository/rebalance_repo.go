@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -86,14 +87,79 @@ func (r *RebalanceRepo) CreateOperation(ctx context.Context, op *domain.Rebalanc
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO rebalance_operations (
 			id, chain, token_symbol, from_tier, to_tier, from_wallet_id, to_wallet_id,
-			amount, state, requires_approval
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			amount, state, requires_approval, approved_by
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 	`,
 		op.ID, op.Chain, op.TokenSymbol, string(op.FromTier), string(op.ToTier),
 		op.FromWalletID, op.ToWalletID, op.Amount.String(),
-		string(op.State), op.RequiresApproval,
+		string(op.State), op.RequiresApproval, op.ApprovedBy,
 	)
 	return err
+}
+
+// FindActiveOps returns PENDING or APPROVED operations for a given chain/token/direction
+func (r *RebalanceRepo) FindActiveOps(ctx context.Context, chain, token string, fromTier, toTier domain.WalletTier) ([]*domain.RebalanceOperation, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, chain, token_symbol, from_tier, to_tier, from_wallet_id, to_wallet_id,
+			amount, tx_hash, state, requires_approval, approved_by, ledger_entry_id,
+			error_message, created_at, updated_at
+		FROM rebalance_operations
+		WHERE chain = $1 AND token_symbol = $2
+			AND from_tier = $3 AND to_tier = $4
+			AND state IN ('PENDING', 'APPROVED', 'SIGNING', 'BROADCAST')
+		ORDER BY created_at DESC
+	`, chain, token, string(fromTier), string(toTier))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanOperations(rows)
+}
+
+// PendingSourceWalletIDs returns a set of wallet IDs that are currently the source
+// of PENDING/APPROVED/SIGNING/BROADCAST operations for a given chain.
+func (r *RebalanceRepo) PendingSourceWalletIDs(ctx context.Context, chain string) (map[uuid.UUID]bool, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT DISTINCT from_wallet_id
+		FROM rebalance_operations
+		WHERE chain = $1 AND state IN ('PENDING', 'APPROVED', 'SIGNING', 'BROADCAST')
+	`, chain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[uuid.UUID]bool)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result[id] = true
+	}
+	return result, rows.Err()
+}
+
+// SetApprovedBy records who approved an operation
+func (r *RebalanceRepo) SetApprovedBy(ctx context.Context, id uuid.UUID, approvedBy string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE rebalance_operations SET approved_by = $1, updated_at = NOW() WHERE id = $2
+	`, approvedBy, id)
+	return err
+}
+
+// ExpireOperations transitions PENDING ops created before cutoff to REJECTED state.
+// Returns the number of expired operations.
+func (r *RebalanceRepo) ExpireOperations(ctx context.Context, cutoff time.Time) (int, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE rebalance_operations
+		SET state = 'REJECTED', error_message = 'expired: not acted on within TTL', updated_at = NOW()
+		WHERE state = 'PENDING' AND created_at < $1
+	`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // UpdateOperationState transitions a rebalance operation to a new state
