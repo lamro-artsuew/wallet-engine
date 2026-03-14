@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 // WalletTier defines the custody tier of a wallet
@@ -338,16 +339,16 @@ type TierBalance struct {
 
 // FiatAccount represents a fiat bank/EMI account
 type FiatAccount struct {
-	ID                uuid.UUID `json:"id"`
-	WorkspaceID       uuid.UUID `json:"workspace_id"`
-	Currency          string    `json:"currency"`
-	Provider          string    `json:"provider"`
-	ProviderAccountID *string   `json:"provider_account_id,omitempty"`
-	AccountType       string    `json:"account_type"`
-	Balance           float64   `json:"balance"`
-	IsActive          bool      `json:"is_active"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                uuid.UUID       `json:"id"`
+	WorkspaceID       uuid.UUID       `json:"workspace_id"`
+	Currency          string          `json:"currency"`
+	Provider          string          `json:"provider"`
+	ProviderAccountID *string         `json:"provider_account_id,omitempty"`
+	AccountType       string          `json:"account_type"`
+	Balance           decimal.Decimal `json:"balance"`
+	IsActive          bool            `json:"is_active"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
 // FiatTransactionType enumerates fiat transaction types
@@ -374,40 +375,40 @@ const (
 
 // FiatTransaction represents a fiat money movement
 type FiatTransaction struct {
-	ID            uuid.UUID            `json:"id"`
-	WorkspaceID   uuid.UUID            `json:"workspace_id"`
-	FiatAccountID uuid.UUID            `json:"fiat_account_id"`
-	Type          FiatTransactionType  `json:"type"`
-	Currency      string               `json:"currency"`
-	Amount        float64              `json:"amount"`
-	Reference     *string              `json:"reference,omitempty"`
-	Counterparty  *string              `json:"counterparty,omitempty"`
-	State         FiatTransactionState `json:"state"`
-	LedgerEntryID *uuid.UUID           `json:"ledger_entry_id,omitempty"`
+	ID            uuid.UUID              `json:"id"`
+	WorkspaceID   uuid.UUID              `json:"workspace_id"`
+	FiatAccountID uuid.UUID              `json:"fiat_account_id"`
+	Type          FiatTransactionType    `json:"type"`
+	Currency      string                 `json:"currency"`
+	Amount        decimal.Decimal        `json:"amount"`
+	Reference     *string                `json:"reference,omitempty"`
+	Counterparty  *string                `json:"counterparty,omitempty"`
+	State         FiatTransactionState   `json:"state"`
+	LedgerEntryID *uuid.UUID             `json:"ledger_entry_id,omitempty"`
 	Metadata      map[string]interface{} `json:"metadata"`
-	CreatedAt     time.Time            `json:"created_at"`
-	UpdatedAt     time.Time            `json:"updated_at"`
+	CreatedAt     time.Time              `json:"created_at"`
+	UpdatedAt     time.Time              `json:"updated_at"`
 }
 
 // ConversionRate represents a currency conversion rate
 type ConversionRate struct {
-	ID           uuid.UUID  `json:"id"`
-	FromCurrency string     `json:"from_currency"`
-	ToCurrency   string     `json:"to_currency"`
-	Rate         float64    `json:"rate"`
-	Source       string     `json:"source"`
-	ValidFrom    time.Time  `json:"valid_from"`
-	ValidUntil   *time.Time `json:"valid_until,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID           uuid.UUID       `json:"id"`
+	FromCurrency string          `json:"from_currency"`
+	ToCurrency   string          `json:"to_currency"`
+	Rate         decimal.Decimal `json:"rate"`
+	Source       string          `json:"source"`
+	ValidFrom    time.Time       `json:"valid_from"`
+	ValidUntil   *time.Time      `json:"valid_until,omitempty"`
+	CreatedAt    time.Time       `json:"created_at"`
 }
 
 // ConversionRequest is a request to convert between fiat and crypto
 type ConversionRequest struct {
-	WorkspaceID  uuid.UUID `json:"workspace_id"`
-	FromCurrency string    `json:"from_currency"`
-	ToCurrency   string    `json:"to_currency"`
-	Amount       float64   `json:"amount"`
-	Direction    string    `json:"direction"`
+	WorkspaceID  uuid.UUID       `json:"workspace_id"`
+	FromCurrency string          `json:"from_currency"`
+	ToCurrency   string          `json:"to_currency"`
+	Amount       decimal.Decimal `json:"amount"`
+	Direction    string          `json:"direction"`
 }
 
 // VelocityLimit defines withdrawal rate limits

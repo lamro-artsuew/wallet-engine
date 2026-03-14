@@ -12,6 +12,7 @@ import (
 	"github.com/lamro-artsuew/wallet-engine/internal/adapter/repository"
 	"github.com/lamro-artsuew/wallet-engine/internal/domain"
 	"github.com/lamro-artsuew/wallet-engine/internal/service"
+	"github.com/shopspring/decimal"
 )
 
 // Handler contains all HTTP endpoint handlers
@@ -1286,7 +1287,7 @@ func (h *Handler) CreateFiatAccount(c *gin.Context) {
 		Provider:          strings.ToUpper(req.Provider),
 		ProviderAccountID: providerAccountID,
 		AccountType:       req.AccountType,
-		Balance:           0,
+		Balance:           decimal.Zero,
 		IsActive:          true,
 	}
 
@@ -1332,12 +1333,13 @@ func (h *Handler) ListFiatAccounts(c *gin.Context) {
 	c.JSON(http.StatusOK, accounts)
 }
 
-// FiatDepositRequest is the request body for recording a fiat deposit
+// FiatDepositRequest is the request body for recording a fiat deposit.
+// Amount is a string to preserve precision — never use float64 for financial amounts.
 type FiatDepositRequest struct {
-	WorkspaceID string  `json:"workspace_id" binding:"required"`
-	Currency    string  `json:"currency" binding:"required"`
-	Amount      float64 `json:"amount" binding:"required"`
-	Reference   string  `json:"reference"`
+	WorkspaceID string `json:"workspace_id" binding:"required"`
+	Currency    string `json:"currency" binding:"required"`
+	Amount      string `json:"amount" binding:"required"`
+	Reference   string `json:"reference"`
 }
 
 // RecordFiatDeposit handles POST /fiat/deposit
@@ -1354,12 +1356,17 @@ func (h *Handler) RecordFiatDeposit(c *gin.Context) {
 		return
 	}
 
-	if req.Amount <= 0 {
+	amount, err := decimal.NewFromString(req.Amount)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount: must be a decimal number string"})
+		return
+	}
+	if !amount.IsPositive() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be positive"})
 		return
 	}
 
-	tx, err := h.fiatBridgeSvc.RecordFiatDeposit(c.Request.Context(), workspaceID, req.Currency, req.Amount, req.Reference)
+	tx, err := h.fiatBridgeSvc.RecordFiatDeposit(c.Request.Context(), workspaceID, req.Currency, amount, req.Reference)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1368,12 +1375,13 @@ func (h *Handler) RecordFiatDeposit(c *gin.Context) {
 	c.JSON(http.StatusCreated, tx)
 }
 
-// FiatWithdrawalRequest is the request body for recording a fiat withdrawal
+// FiatWithdrawalRequest is the request body for recording a fiat withdrawal.
+// Amount is a string to preserve precision.
 type FiatWithdrawalRequest struct {
-	WorkspaceID string  `json:"workspace_id" binding:"required"`
-	Currency    string  `json:"currency" binding:"required"`
-	Amount      float64 `json:"amount" binding:"required"`
-	Reference   string  `json:"reference"`
+	WorkspaceID string `json:"workspace_id" binding:"required"`
+	Currency    string `json:"currency" binding:"required"`
+	Amount      string `json:"amount" binding:"required"`
+	Reference   string `json:"reference"`
 }
 
 // RecordFiatWithdrawal handles POST /fiat/withdraw
@@ -1390,12 +1398,17 @@ func (h *Handler) RecordFiatWithdrawal(c *gin.Context) {
 		return
 	}
 
-	if req.Amount <= 0 {
+	amount, err := decimal.NewFromString(req.Amount)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount: must be a decimal number string"})
+		return
+	}
+	if !amount.IsPositive() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be positive"})
 		return
 	}
 
-	tx, err := h.fiatBridgeSvc.RecordFiatWithdrawal(c.Request.Context(), workspaceID, req.Currency, req.Amount, req.Reference)
+	tx, err := h.fiatBridgeSvc.RecordFiatWithdrawal(c.Request.Context(), workspaceID, req.Currency, amount, req.Reference)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1444,13 +1457,14 @@ func (h *Handler) ListFiatTransactions(c *gin.Context) {
 	c.JSON(http.StatusOK, txs)
 }
 
-// ConvertRequest is the request body for currency conversion
+// ConvertRequest is the request body for currency conversion.
+// Amount is a string to preserve precision.
 type ConvertRequest struct {
-	WorkspaceID  string  `json:"workspace_id" binding:"required"`
-	FromCurrency string  `json:"from_currency" binding:"required"`
-	ToCurrency   string  `json:"to_currency" binding:"required"`
-	Amount       float64 `json:"amount" binding:"required"`
-	Direction    string  `json:"direction" binding:"required"`
+	WorkspaceID  string `json:"workspace_id" binding:"required"`
+	FromCurrency string `json:"from_currency" binding:"required"`
+	ToCurrency   string `json:"to_currency" binding:"required"`
+	Amount       string `json:"amount" binding:"required"`
+	Direction    string `json:"direction" binding:"required"`
 }
 
 // Convert handles POST /fiat/convert
@@ -1467,7 +1481,12 @@ func (h *Handler) Convert(c *gin.Context) {
 		return
 	}
 
-	if req.Amount <= 0 {
+	amount, err := decimal.NewFromString(req.Amount)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid amount: must be a decimal number string"})
+		return
+	}
+	if !amount.IsPositive() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be positive"})
 		return
 	}
@@ -1481,7 +1500,7 @@ func (h *Handler) Convert(c *gin.Context) {
 		WorkspaceID:  workspaceID,
 		FromCurrency: req.FromCurrency,
 		ToCurrency:   req.ToCurrency,
-		Amount:       req.Amount,
+		Amount:       amount,
 		Direction:    req.Direction,
 	}
 
@@ -1513,12 +1532,13 @@ func (h *Handler) GetRate(c *gin.Context) {
 	c.JSON(http.StatusOK, rate)
 }
 
-// SetRateRequest is the request body for setting a conversion rate
+// SetRateRequest is the request body for setting a conversion rate.
+// Rate is a string to preserve precision.
 type SetRateRequest struct {
-	FromCurrency string  `json:"from_currency" binding:"required"`
-	ToCurrency   string  `json:"to_currency" binding:"required"`
-	Rate         float64 `json:"rate" binding:"required"`
-	Source       string  `json:"source"`
+	FromCurrency string `json:"from_currency" binding:"required"`
+	ToCurrency   string `json:"to_currency" binding:"required"`
+	Rate         string `json:"rate" binding:"required"`
+	Source       string `json:"source"`
 }
 
 // SetRate sets a conversion rate
@@ -1529,7 +1549,12 @@ func (h *Handler) SetRate(c *gin.Context) {
 		return
 	}
 
-	if req.Rate <= 0 {
+	rate, err := decimal.NewFromString(req.Rate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid rate: must be a decimal number string"})
+		return
+	}
+	if !rate.IsPositive() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "rate must be positive"})
 		return
 	}
@@ -1539,7 +1564,7 @@ func (h *Handler) SetRate(c *gin.Context) {
 		source = "MANUAL"
 	}
 
-	if err := h.fiatBridgeSvc.SetRate(c.Request.Context(), req.FromCurrency, req.ToCurrency, req.Rate, source); err != nil {
+	if err := h.fiatBridgeSvc.SetRate(c.Request.Context(), req.FromCurrency, req.ToCurrency, rate, source); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -1548,6 +1573,6 @@ func (h *Handler) SetRate(c *gin.Context) {
 		"status": "rate set",
 		"from":   strings.ToUpper(req.FromCurrency),
 		"to":     strings.ToUpper(req.ToCurrency),
-		"rate":   req.Rate,
+		"rate":   rate.String(),
 	})
 }

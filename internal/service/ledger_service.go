@@ -396,7 +396,88 @@ func (s *LedgerService) PostFiatEntry(ctx context.Context, idempotencyKey, entry
 	return &entry.ID, nil
 }
 
-// getOrCreateAccount resolves a ledger account by code, creating it if missing.
+// PostConversionEntry creates a single atomic 4-line journal entry for currency conversions.
+// This prevents split-brain state that occurs when two separate entries are posted
+// for the two legs of a conversion — if one succeeds and the other fails, funds are lost.
+//
+// The 4 lines represent:
+//   Line 1: Debit  sourceDebitAccount   (sourceAmount in sourceCurrency)
+//   Line 2: Credit sourceCreditAccount  (sourceAmount in sourceCurrency)
+//   Line 3: Debit  targetDebitAccount   (targetAmount in targetCurrency)
+//   Line 4: Credit targetCreditAccount  (targetAmount in targetCurrency)
+//
+// PostEntry verifies total debits == total credits per currency via the existing
+// balance check (which sums all lines). For cross-currency entries, debits and credits
+// balance within each currency.
+func (s *LedgerService) PostConversionEntry(ctx context.Context, idempotencyKey, description string,
+	sourceDebitCode, sourceCreditCode, sourceCurrency string, sourceAmount *big.Int,
+	targetDebitCode, targetCreditCode, targetCurrency string, targetAmount *big.Int,
+	refType string, refID *uuid.UUID) (*uuid.UUID, error) {
+
+	if err := validateAmount(sourceAmount); err != nil {
+		return nil, fmt.Errorf("source amount: %w", err)
+	}
+	if err := validateAmount(targetAmount); err != nil {
+		return nil, fmt.Errorf("target amount: %w", err)
+	}
+
+	// Idempotency check
+	existing, err := s.ledgerRepo.FindEntryByIdempotencyKey(ctx, idempotencyKey)
+	if err == nil {
+		return &existing.ID, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		ledgerPostingErrors.WithLabelValues("FIAT_CONVERSION", "idempotency_check").Inc()
+		return nil, fmt.Errorf("idempotency check for %s failed: %w", idempotencyKey, err)
+	}
+
+	// Resolve all 4 accounts
+	srcDebitAcct, err := s.getOrCreateAccount(ctx, sourceDebitCode, sourceCurrency)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source debit account %s: %w", sourceDebitCode, err)
+	}
+	srcCreditAcct, err := s.getOrCreateAccount(ctx, sourceCreditCode, sourceCurrency)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source credit account %s: %w", sourceCreditCode, err)
+	}
+	tgtDebitAcct, err := s.getOrCreateAccount(ctx, targetDebitCode, targetCurrency)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target debit account %s: %w", targetDebitCode, err)
+	}
+	tgtCreditAcct, err := s.getOrCreateAccount(ctx, targetCreditCode, targetCurrency)
+	if err != nil {
+		return nil, fmt.Errorf("resolve target credit account %s: %w", targetCreditCode, err)
+	}
+
+	entry := &domain.LedgerEntry{
+		ID:             uuid.New(),
+		IdempotencyKey: idempotencyKey,
+		EntryType:      "FIAT_CONVERSION",
+		Description:    description,
+		State:          domain.EntryPosted,
+		ReferenceType:  &refType,
+		ReferenceID:    refID,
+		Lines: []domain.LedgerLine{
+			{AccountID: srcDebitAcct.ID, Amount: new(big.Int).Set(sourceAmount), Currency: sourceCurrency, IsDebit: true},
+			{AccountID: srcCreditAcct.ID, Amount: new(big.Int).Set(sourceAmount), Currency: sourceCurrency, IsDebit: false},
+			{AccountID: tgtDebitAcct.ID, Amount: new(big.Int).Set(targetAmount), Currency: targetCurrency, IsDebit: true},
+			{AccountID: tgtCreditAcct.ID, Amount: new(big.Int).Set(targetAmount), Currency: targetCurrency, IsDebit: false},
+		},
+	}
+
+	if err := s.ledgerRepo.PostEntry(ctx, entry); err != nil {
+		ledgerPostingErrors.WithLabelValues("FIAT_CONVERSION", "post").Inc()
+		return nil, fmt.Errorf("post conversion entry: %w", err)
+	}
+
+	ledgerEntriesPosted.WithLabelValues("FIAT_CONVERSION").Inc()
+	log.Info().
+		Str("entry_id", entry.ID.String()).
+		Str("hash", entry.EntryHash).
+		Msg("conversion ledger entry posted (4-line atomic)")
+
+	return &entry.ID, nil
+}
 // Uses the consolidated FindOrCreateAccount repo method for atomicity.
 func (s *LedgerService) getOrCreateAccount(ctx context.Context, code, currency string) (*domain.LedgerAccount, error) {
 	account, err := s.ledgerRepo.FindAccountByCode(ctx, code)
