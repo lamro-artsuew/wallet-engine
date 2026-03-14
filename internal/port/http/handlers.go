@@ -867,10 +867,14 @@ func (h *Handler) ListRebalanceOperations(c *gin.Context) {
 	if limit > 100 {
 		limit = 100
 	}
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if offset < 0 {
+		offset = 0
+	}
 
-	ops, err := h.rebalanceSvc.ListOperations(c.Request.Context(), chain, state, limit)
+	ops, err := h.rebalanceSvc.ListOperations(c.Request.Context(), chain, state, limit, offset)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, ops)

@@ -273,20 +273,6 @@ func (r *VelocityRepo) LastWithdrawalTime(ctx context.Context, userID uuid.UUID,
 	return t, nil
 }
 
-// parseOptionalBigInt parses a nullable string into an optional big.Int,
-// returning an error if the string is present but malformed.
-func parseOptionalBigInt(s *string, target **big.Int) error {
-	if s == nil {
-		return nil
-	}
-	v := new(big.Int)
-	if _, ok := v.SetString(*s, 10); !ok {
-		return fmt.Errorf("invalid numeric value: %q", *s)
-	}
-	*target = v
-	return nil
-}
-
 func scanVelocityLimits(rows pgx.Rows) ([]*domain.VelocityLimit, error) {
 	var limits []*domain.VelocityLimit
 	for rows.Next() {

@@ -42,8 +42,11 @@ var (
 	}, []string{"chain", "error_type"})
 )
 
-// Default operation expiry: ops not acted on within this window are eligible for cleanup
-const defaultOpExpiryDuration = 24 * time.Hour
+// Default operation expiry windows
+const (
+	pendingExpiryDuration  = 24 * time.Hour // PENDING ops expire after 24h
+	approvedExpiryDuration = 48 * time.Hour // APPROVED ops expire after 48h (requires review)
+)
 
 // RebalanceService manages warm/cold wallet rebalancing
 type RebalanceService struct {
@@ -160,13 +163,9 @@ func (s *RebalanceService) ApproveRebalance(ctx context.Context, id uuid.UUID, a
 			fromCode, safeIntString(fromBal), op.Amount.String())
 	}
 
-	if err := s.rebalanceRepo.UpdateOperationState(ctx, id, domain.RebalanceApproved, nil); err != nil {
+	// Atomic approval: sets state PENDING→APPROVED and records approver in one UPDATE
+	if err := s.rebalanceRepo.ApproveOperation(ctx, id, approvedBy); err != nil {
 		return fmt.Errorf("approve operation: %w", err)
-	}
-
-	// Record who approved
-	if err := s.rebalanceRepo.SetApprovedBy(ctx, id, approvedBy); err != nil {
-		log.Warn().Err(err).Str("id", id.String()).Msg("failed to record approver")
 	}
 
 	rebalanceOpsTotal.WithLabelValues(op.Chain, string(op.FromTier), string(op.ToTier), metricResultApproved).Inc()
@@ -220,15 +219,17 @@ func (s *RebalanceService) UpdatePolicy(ctx context.Context, p *domain.Rebalance
 	return s.rebalanceRepo.UpdatePolicy(ctx, p)
 }
 
-// ListOperations returns rebalance operations with optional filters
-func (s *RebalanceService) ListOperations(ctx context.Context, chain, state string, limit int) ([]*domain.RebalanceOperation, error) {
-	return s.rebalanceRepo.ListOperations(ctx, chain, state, limit)
+// ListOperations returns rebalance operations with optional filters and pagination
+func (s *RebalanceService) ListOperations(ctx context.Context, chain, state string, limit, offset int) ([]*domain.RebalanceOperation, error) {
+	return s.rebalanceRepo.ListOperations(ctx, chain, state, limit, offset)
 }
 
-// ExpireStaleOperations transitions PENDING ops older than the expiry window to REJECTED.
+// ExpireStaleOperations transitions stale PENDING ops (>24h) to REJECTED and
+// stale APPROVED ops (>48h) to FAILED (requires human review).
 func (s *RebalanceService) ExpireStaleOperations(ctx context.Context) (int, error) {
-	cutoff := time.Now().Add(-defaultOpExpiryDuration)
-	return s.rebalanceRepo.ExpireOperations(ctx, cutoff)
+	pendingCutoff := time.Now().Add(-pendingExpiryDuration)
+	approvedCutoff := time.Now().Add(-approvedExpiryDuration)
+	return s.rebalanceRepo.ExpireOperations(ctx, pendingCutoff, approvedCutoff)
 }
 
 // computeTierBalance calculates the balance distribution across HOT/WARM/COLD

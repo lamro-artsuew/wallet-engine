@@ -195,7 +195,7 @@ func (s *WithdrawalService) TransitionState(ctx context.Context, id uuid.UUID, n
 		return fmt.Errorf("invalid state transition: %s → %s", w.State, newState)
 	}
 
-	if err := s.withdrawalRepo.UpdateState(ctx, id, newState, errorMsg); err != nil {
+	if err := s.withdrawalRepo.UpdateState(ctx, id, w.State, newState, errorMsg); err != nil {
 		return fmt.Errorf("update state: %w", err)
 	}
 
@@ -245,9 +245,9 @@ func (s *WithdrawalService) ListAll(ctx context.Context, limit, offset int) ([]*
 	return s.withdrawalRepo.FindAll(ctx, limit, offset)
 }
 
-// ListByChainAndState returns withdrawals for a chain in a state
+// ListByChainAndState returns withdrawals for a chain in a state (bounded)
 func (s *WithdrawalService) ListByChainAndState(ctx context.Context, chain string, state domain.WithdrawalState) ([]*domain.Withdrawal, error) {
-	return s.withdrawalRepo.FindByChainAndState(ctx, chain, state)
+	return s.withdrawalRepo.FindByChainAndState(ctx, chain, state, 100)
 }
 
 func isValidTransition(from, to domain.WithdrawalState) bool {
