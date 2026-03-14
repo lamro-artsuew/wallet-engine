@@ -68,7 +68,12 @@ spec:
             - name: AVALANCHE_RPC_URL
               value: "http://avalanche.blockchain.svc:9650/ext/bc/C/rpc"
             - name: TRON_RPC_URL
-              value: "http://tron.blockchain.svc:8090"
+              value: "https://api.trongrid.io"
+            - name: TRON_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wallet-engine-secrets
+                  key: tron-api-key
           resources:
             requests:
               cpu: 250m
