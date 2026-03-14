@@ -74,6 +74,32 @@ spec:
                 secretKeyRef:
                   name: wallet-engine-secrets
                   key: tron-api-key
+            # --- Sweep / Reorg / Reconciliation feature flags ---
+            - name: FEATURE_SWEEP_ENABLED
+              value: "false"  # Keep OFF until sweep worker validated with test deposits
+            - name: FEATURE_REORG_DETECTION_ENABLED
+              value: "true"
+            - name: FEATURE_RECONCILIATION_ENABLED
+              value: "true"
+            # Sweep config (inactive until FEATURE_SWEEP_ENABLED=true)
+            - name: SWEEP_INTERVAL_SECONDS
+              value: "30"
+            - name: SWEEP_BATCH_SIZE
+              value: "10"
+            - name: SWEEP_MIN_CONFIRMATIONS
+              value: "12"
+            # Gas oracle
+            - name: GAS_ORACLE_SAMPLE_INTERVAL
+              value: "15"
+            - name: GAS_ORACLE_MULTIPLIER
+              value: "1.2"
+            - name: GAS_ORACLE_MAX_GWEI
+              value: "500"
+            # Reconciliation
+            - name: RECONCILIATION_INTERVAL_SECONDS
+              value: "3600"
+            - name: RECONCILIATION_DRIFT_THRESHOLD
+              value: "1000000000000000000"  # 1 ETH in wei
           resources:
             requests:
               cpu: 250m
