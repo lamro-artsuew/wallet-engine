@@ -105,7 +105,8 @@ func (di *DepositIndexer) Start(ctx context.Context) error {
 
 	for name, ci := range di.chains {
 		if err := ci.adapter.Connect(ctx); err != nil {
-			log.Error().Err(err).Str("chain", name).Msg("failed to connect, skipping chain")
+			log.Warn().Err(err).Str("chain", name).Msg("failed to connect, will retry in background")
+			go di.retryConnect(ctx, ci)
 			continue
 		}
 
@@ -118,6 +119,33 @@ func (di *DepositIndexer) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// retryConnect periodically attempts to connect to a chain that was unavailable at startup
+func (di *DepositIndexer) retryConnect(ctx context.Context, ci *chainIndexer) {
+	retryInterval := 30 * time.Second
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryInterval):
+		}
+
+		if err := ci.adapter.Connect(ctx); err != nil {
+			ci.logger.Debug().Err(err).Msg("chain still unavailable, retrying...")
+			if retryInterval < 5*time.Minute {
+				retryInterval = retryInterval * 2
+			}
+			continue
+		}
+
+		ci.logger.Info().Msg("chain connected after retry, starting indexer")
+		if err := di.refreshWatchAddresses(ctx, ci); err != nil {
+			ci.logger.Error().Err(err).Msg("failed to load watch addresses")
+		}
+		go di.runChainIndexer(ctx, ci)
+		return
+	}
 }
 
 // Stop halts all indexers
@@ -170,11 +198,26 @@ func (di *DepositIndexer) refreshWatchAddresses(ctx context.Context, ci *chainIn
 func (di *DepositIndexer) runChainIndexer(ctx context.Context, ci *chainIndexer) {
 	ci.logger.Info().Msg("starting chain indexer")
 
-	// Determine start block
+	// Determine start block: saved state > configured StartBlock > current chain head
 	startBlock := ci.cfg.StartBlock
 	state, err := di.indexRepo.GetState(ctx, ci.cfg.Name)
 	if err == nil && state.LastBlockNumber > startBlock {
 		startBlock = state.LastBlockNumber + 1
+	} else if startBlock <= 0 {
+		// No saved state and no configured start block — start from current head.
+		// Custody wallets only need to detect deposits from deployment time forward.
+		latest, latestErr := ci.adapter.LatestBlock(ctx)
+		if latestErr == nil && latest > 0 {
+			startBlock = int64(latest) - int64(ci.cfg.Confirmations)
+			if startBlock < 1 {
+				startBlock = 1
+			}
+			ci.logger.Info().Int64("startBlock", startBlock).Uint64("chainHead", latest).
+				Msg("no saved state, starting from near chain head")
+		} else {
+			ci.logger.Warn().Err(latestErr).Msg("cannot determine chain head, will retry")
+			startBlock = 0
+		}
 	}
 
 	pollInterval := time.Duration(ci.cfg.BlockTime) * time.Second
@@ -212,6 +255,16 @@ func (di *DepositIndexer) runChainIndexer(ctx context.Context, ci *chainIndexer)
 			continue
 		}
 		consecutiveErrors = 0
+
+		// If we still don't have a valid start block (initial head query failed), set it now
+		if currentBlock <= 0 {
+			currentBlock = int64(latestBlock) - int64(ci.cfg.Confirmations)
+			if currentBlock < 1 {
+				currentBlock = 1
+			}
+			ci.logger.Info().Int64("startBlock", currentBlock).Uint64("chainHead", latestBlock).
+				Msg("resolved start block from chain head")
+		}
 
 		// Calculate lag
 		if int64(latestBlock) > currentBlock {
