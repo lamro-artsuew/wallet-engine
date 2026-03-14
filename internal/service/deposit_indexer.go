@@ -266,6 +266,21 @@ func (di *DepositIndexer) runChainIndexer(ctx context.Context, ci *chainIndexer)
 				Msg("resolved start block from chain head")
 		}
 
+		// Fast-forward if indexer is too far behind (>10K blocks).
+		// Custody deposit detection only needs real-time monitoring —
+		// scanning millions of old blocks wastes resources.
+		maxLag := int64(10000)
+		lag := int64(latestBlock) - currentBlock
+		if lag > maxLag {
+			newStart := int64(latestBlock) - int64(ci.cfg.Confirmations)
+			ci.logger.Warn().
+				Int64("oldBlock", currentBlock).
+				Int64("newBlock", newStart).
+				Int64("skipped", lag).
+				Msg("indexer too far behind, fast-forwarding to near chain head")
+			currentBlock = newStart
+		}
+
 		// Calculate lag
 		if int64(latestBlock) > currentBlock {
 			indexerLag.WithLabelValues(ci.cfg.Name).Set(float64(int64(latestBlock) - currentBlock))
