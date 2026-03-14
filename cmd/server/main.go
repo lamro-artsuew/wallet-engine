@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -94,8 +96,9 @@ func main() {
 	}
 
 	// Master seed for HD derivation
-	// In production: fetch from Vault at vault:secret/wallet-engine/master-seed
-	masterSeed := []byte(envStr("MASTER_SEED", "DEVELOPMENT-SEED-DO-NOT-USE-IN-PRODUCTION"))
+	// Production: set MASTER_SEED_SOURCE=vault and configure VAULT_ADDR + VAULT_TOKEN
+	// The seed is fetched from Vault KV at secret/wallet-engine/master-seed
+	masterSeed := loadMasterSeed(cfg.Signer)
 	addrSvc := service.NewAddressService(pool, addrRepo, hdRepo, masterSeed)
 
 	// Ledger and withdrawal services
@@ -125,6 +128,74 @@ func main() {
 	} else {
 		log.Warn().Msg("deposit indexer disabled by feature flag")
 	}
+
+	// --- New services: Sweep, Nonce, Reorg, Reconciliation, Gas ---
+
+	sweepRepo := repository.NewSweepRepo(pool)
+	nonceRepo := repository.NewNonceRepo(pool)
+	reorgRepo := repository.NewReorgRepo(pool)
+	reconRepo := repository.NewReconciliationRepo(pool)
+
+	// Nonce manager (requires EVM adapters)
+	nonceManager := service.NewNonceManager(nonceRepo, indexer.GetEVMAdapters())
+
+	// Gas oracle
+	maxGasPrice := new(big.Int).Mul(
+		big.NewInt(cfg.GasOracle.MaxGasPriceGwei),
+		big.NewInt(1_000_000_000), // gwei → wei
+	)
+	maxPrices := make(map[string]*big.Int)
+	for _, ch := range cfg.Chains {
+		if ch.Enabled {
+			maxPrices[ch.Name] = new(big.Int).Set(maxGasPrice)
+		}
+	}
+	gasOracle := service.NewGasOracle(indexer.GetEVMAdapters(), cfg.GasOracle.Multiplier, maxPrices)
+	gasOracle.Start(ctx, time.Duration(cfg.GasOracle.SampleInterval)*time.Second)
+	defer gasOracle.Stop()
+
+	// Sweep worker (gated by feature flag — OFF by default until validated)
+	if cfg.Features.SweepEnabled {
+		sweepWorker := service.NewSweepWorker(
+			depositRepo, sweepRepo, walletRepo, addrRepo,
+			nonceManager, gasOracle, ledgerSvc,
+			indexer.GetEVMAdapters(), masterSeed,
+			time.Duration(cfg.Sweep.Interval)*time.Second,
+			cfg.Sweep.BatchSize,
+		)
+		go sweepWorker.Start(ctx)
+		defer sweepWorker.Stop()
+		log.Info().Msg("sweep worker enabled")
+	} else {
+		log.Warn().Msg("sweep worker disabled by feature flag (FEATURE_SWEEP_ENABLED=false)")
+	}
+
+	// Reorg detector (gated by feature flag)
+	var reorgDetector *service.ReorgDetector
+	if cfg.Features.ReorgDetectionEnabled {
+		reorgDetector = service.NewReorgDetector(reorgRepo, depositRepo, indexRepo, indexer.GetEVMAdapters(), cfg.Chains)
+		go reorgDetector.Start(ctx)
+		defer reorgDetector.Stop()
+		log.Info().Msg("reorg detector enabled")
+	}
+
+	// Reconciliation service (gated by feature flag)
+	if cfg.Features.ReconciliationEnabled {
+		driftThreshold := big.NewInt(cfg.Reconciliation.DriftThresholdWei)
+		reconInterval := time.Duration(cfg.Reconciliation.Interval) * time.Second
+		reconSvc := service.NewReconciliationService(
+			reconRepo, walletRepo, depositRepo, ledgerRepo,
+			indexer.GetEVMAdapters(), driftThreshold, reconInterval,
+		)
+		go reconSvc.Start(ctx)
+		defer reconSvc.Stop()
+		log.Info().Msg("reconciliation service enabled")
+	}
+
+	// Suppress unused variable warnings
+	_ = signer
+	_ = reorgDetector
+	_ = sweepRepo
 
 	// Fiat bridge service
 	fiatBridgeSvc := service.NewFiatBridgeService(fiatRepo, ledgerSvc)
@@ -193,6 +264,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		"migrations/004_rebalance.sql",
 		"migrations/005_fiat_bridge.sql",
 		"migrations/006_ledger_hardening.sql",
+		"migrations/007_sweep_nonce_reorg.sql",
 	}
 	altPrefix := "/app/"
 
@@ -259,4 +331,71 @@ func envStr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// loadMasterSeed loads the HD derivation master seed.
+// In production, set MASTER_SEED_SOURCE=vault to fetch from HashiCorp Vault KV.
+// Otherwise falls back to MASTER_SEED env var (development only).
+func loadMasterSeed(signerCfg config.SignerConfig) []byte {
+	source := envStr("MASTER_SEED_SOURCE", "env")
+
+	switch source {
+	case "vault":
+		if signerCfg.VaultAddr == "" || signerCfg.VaultToken == "" {
+			log.Fatal().Msg("MASTER_SEED_SOURCE=vault requires VAULT_ADDR and VAULT_TOKEN")
+		}
+		seed, err := fetchSeedFromVault(signerCfg.VaultAddr, signerCfg.VaultToken)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to fetch master seed from Vault")
+		}
+		log.Info().Msg("master seed loaded from Vault KV")
+		return seed
+
+	default:
+		seed := envStr("MASTER_SEED", "DEVELOPMENT-SEED-DO-NOT-USE-IN-PRODUCTION")
+		if seed == "DEVELOPMENT-SEED-DO-NOT-USE-IN-PRODUCTION" {
+			log.Warn().Msg("⚠️ USING DEVELOPMENT SEED — set MASTER_SEED_SOURCE=vault for production")
+		}
+		return []byte(seed)
+	}
+}
+
+// fetchSeedFromVault reads the master seed from Vault KV v2 at secret/data/wallet-engine/master-seed
+func fetchSeedFromVault(vaultAddr, vaultToken string) ([]byte, error) {
+	url := fmt.Sprintf("%s/v1/secret/data/wallet-engine/master-seed", strings.TrimRight(vaultAddr, "/"))
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Vault-Token", vaultToken)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("vault request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("vault returned HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data struct {
+			Data map[string]string `json:"data"`
+		} `json:"data"`
+	}
+
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode vault response: %w", err)
+	}
+
+	seed, ok := result.Data.Data["seed"]
+	if !ok || seed == "" {
+		return nil, fmt.Errorf("seed field not found in Vault KV at secret/wallet-engine/master-seed")
+	}
+
+	return []byte(seed), nil
 }

@@ -84,6 +84,11 @@ func (s *LocalSigner) Sign(ctx context.Context, walletID uuid.UUID, chain string
 	privKey.D = new(big.Int).SetBytes(privKeyBytes)
 	privKey.PublicKey.X, privKey.PublicKey.Y = privKey.Curve.ScalarBaseMult(privKeyBytes)
 
+	// Zero the decrypted key material immediately
+	for i := range privKeyBytes {
+		privKeyBytes[i] = 0
+	}
+
 	// Sign the transaction hash
 	r, ss, err := ecdsa.Sign(strings.NewReader(hex.EncodeToString(txHash)), privKey, txHash)
 	if err != nil {
@@ -94,6 +99,9 @@ func (s *LocalSigner) Sign(ctx context.Context, walletID uuid.UUID, chain string
 	// Encode as r || s (64 bytes for P256)
 	sig := append(r.Bytes(), ss.Bytes()...)
 	signingOpsTotal.WithLabelValues(s.Type(), chain, "success").Inc()
+
+	// Zero the private key D value (best-effort — Go GC may have copies)
+	privKey.D.SetInt64(0)
 
 	log.Info().
 		Str("wallet_id", walletID.String()).
@@ -117,6 +125,11 @@ func (s *LocalSigner) GetPublicKey(ctx context.Context, walletID uuid.UUID) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("decrypt key: %w", err)
 	}
+	defer func() {
+		for i := range privKeyBytes {
+			privKeyBytes[i] = 0
+		}
+	}()
 
 	curve := elliptic.P256()
 	x, y := curve.ScalarBaseMult(privKeyBytes)

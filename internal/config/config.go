@@ -11,13 +11,16 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	Redis    RedisConfig    `yaml:"redis"`
-	Redpanda RedpandaConfig `yaml:"redpanda"`
-	Chains   []ChainConfig  `yaml:"chains"`
-	Signer   SignerConfig   `yaml:"signer"`
-	Features FeatureFlags   `yaml:"features"`
+	Server         ServerConfig         `yaml:"server"`
+	Database       DatabaseConfig       `yaml:"database"`
+	Redis          RedisConfig          `yaml:"redis"`
+	Redpanda       RedpandaConfig       `yaml:"redpanda"`
+	Chains         []ChainConfig        `yaml:"chains"`
+	Signer         SignerConfig         `yaml:"signer"`
+	Features       FeatureFlags         `yaml:"features"`
+	Sweep          SweepConfig          `yaml:"sweep"`
+	GasOracle      GasOracleConfig      `yaml:"gas_oracle"`
+	Reconciliation ReconciliationConfig `yaml:"reconciliation"`
 }
 
 // SignerConfig configures the key management backend
@@ -66,6 +69,28 @@ type FeatureFlags struct {
 	WithdrawalsEnabled    bool `yaml:"withdrawals_enabled"`
 	IndexerEnabled        bool `yaml:"indexer_enabled"`
 	ReconciliationEnabled bool `yaml:"reconciliation_enabled"`
+	SweepEnabled          bool `yaml:"sweep_enabled"`
+	ReorgDetectionEnabled bool `yaml:"reorg_detection_enabled"`
+}
+
+// SweepConfig configures the sweep worker
+type SweepConfig struct {
+	Interval    int `yaml:"interval_seconds"`    // polling interval (default: 30)
+	BatchSize   int `yaml:"batch_size"`           // max sweeps per cycle (default: 10)
+	StaleTxAge  int `yaml:"stale_tx_age_seconds"` // age before a TX is considered stuck (default: 900)
+}
+
+// GasOracleConfig configures the gas price oracle
+type GasOracleConfig struct {
+	SampleInterval int     `yaml:"sample_interval_seconds"` // gas price sampling interval (default: 15)
+	Multiplier     float64 `yaml:"multiplier"`              // safety multiplier (default: 1.2)
+	MaxGasPriceGwei int64  `yaml:"max_gas_price_gwei"`      // per-chain max gas price cap in gwei (default: 500)
+}
+
+// ReconciliationConfig configures the reconciliation service
+type ReconciliationConfig struct {
+	Interval           int   `yaml:"interval_seconds"`        // check interval (default: 3600)
+	DriftThresholdWei  int64 `yaml:"drift_threshold_wei"`     // drift above this triggers FAIL
 }
 
 // TokenConfig holds per-token metadata including decimals
@@ -147,6 +172,22 @@ func Load() *Config {
 			WithdrawalsEnabled:    envBool("FEATURE_WITHDRAWALS_ENABLED", true),
 			IndexerEnabled:        envBool("FEATURE_INDEXER_ENABLED", true),
 			ReconciliationEnabled: envBool("FEATURE_RECONCILIATION_ENABLED", true),
+			SweepEnabled:          envBool("FEATURE_SWEEP_ENABLED", false),
+			ReorgDetectionEnabled: envBool("FEATURE_REORG_DETECTION_ENABLED", true),
+		},
+		Sweep: SweepConfig{
+			Interval:   envInt("SWEEP_INTERVAL_SECONDS", 30),
+			BatchSize:  envInt("SWEEP_BATCH_SIZE", 10),
+			StaleTxAge: envInt("SWEEP_STALE_TX_AGE_SECONDS", 900),
+		},
+		GasOracle: GasOracleConfig{
+			SampleInterval:  envInt("GAS_SAMPLE_INTERVAL_SECONDS", 15),
+			Multiplier:      1.2,
+			MaxGasPriceGwei: int64(envInt("MAX_GAS_PRICE_GWEI", 500)),
+		},
+		Reconciliation: ReconciliationConfig{
+			Interval:          envInt("RECONCILIATION_INTERVAL_SECONDS", 3600),
+			DriftThresholdWei: int64(envInt("RECONCILIATION_DRIFT_THRESHOLD", 1_000_000)),
 		},
 	}
 

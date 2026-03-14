@@ -467,6 +467,101 @@ func (a *EVMAdapter) CheckAddressBlacklist(ctx context.Context, contractAddr com
 	return new(big.Int).SetBytes(result).Sign() != 0, nil
 }
 
+// --- Sweep / Transaction Methods ---
+
+// SuggestGasPrice returns the current suggested gas price (EIP-1559 aware)
+func (a *EVMAdapter) SuggestGasPrice(ctx context.Context) (*big.Int, error) {
+	c, err := a.getClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.SuggestGasPrice(ctx)
+}
+
+// SuggestGasTipCap returns the suggested priority fee (EIP-1559)
+func (a *EVMAdapter) SuggestGasTipCap(ctx context.Context) (*big.Int, error) {
+	c, err := a.getClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.SuggestGasTipCap(ctx)
+}
+
+// PendingNonceAt returns the next nonce for an address (includes pending TXs)
+func (a *EVMAdapter) PendingNonceAt(ctx context.Context, address common.Address) (uint64, error) {
+	c, err := a.getClient(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return c.PendingNonceAt(ctx, address)
+}
+
+// NonceAt returns the confirmed nonce for an address
+func (a *EVMAdapter) NonceAt(ctx context.Context, address common.Address) (uint64, error) {
+	c, err := a.getClient(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return c.NonceAt(ctx, address, nil)
+}
+
+// SendTransaction sends a signed transaction to the network
+func (a *EVMAdapter) SendTransaction(ctx context.Context, tx *types.Transaction) error {
+	c, err := a.getClient(ctx)
+	if err != nil {
+		return err
+	}
+	return c.SendTransaction(ctx, tx)
+}
+
+// TransactionReceipt returns the receipt for a mined transaction (nil if pending)
+func (a *EVMAdapter) TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error) {
+	c, err := a.getClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.TransactionReceipt(ctx, txHash)
+}
+
+// GetTokenBalance returns the ERC-20 token balance of an address
+func (a *EVMAdapter) GetTokenBalance(ctx context.Context, tokenAddr, holderAddr common.Address) (*big.Int, error) {
+	c, err := a.getClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// balanceOf(address) selector
+	selector := crypto.Keccak256([]byte("balanceOf(address)"))[:4]
+	paddedAddr := common.LeftPadBytes(holderAddr.Bytes(), 32)
+	callData := append(selector, paddedAddr...)
+	msg := ethereum.CallMsg{To: &tokenAddr, Data: callData}
+	result, err := c.CallContract(ctx, msg, nil)
+	if err != nil {
+		return nil, fmt.Errorf("balanceOf call: %w", err)
+	}
+	if len(result) < 32 {
+		return big.NewInt(0), nil
+	}
+	return new(big.Int).SetBytes(result[:32]), nil
+}
+
+// EstimateGas estimates the gas needed for a transaction
+func (a *EVMAdapter) EstimateGas(ctx context.Context, msg ethereum.CallMsg) (uint64, error) {
+	c, err := a.getClient(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return c.EstimateGas(ctx, msg)
+}
+
+// HeaderByNumber returns the block header at the given number
+func (a *EVMAdapter) HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error) {
+	c, err := a.getClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.HeaderByNumber(ctx, number)
+}
+
 // Compile-time interface check
 var _ ChainAdapter = (*EVMAdapter)(nil)
 
