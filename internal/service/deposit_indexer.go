@@ -80,7 +80,7 @@ func NewDepositIndexer(
 		if !cfg.Enabled {
 			continue
 		}
-		adapter := chain.NewEVMAdapter(cfg.Name, cfg.ChainID, cfg.RPCURL, cfg.TrackedTokens)
+		adapter := chain.NewEVMAdapter(cfg.Name, cfg.ChainID, cfg.RPCURL, cfg.NativeSymbol, cfg.TrackedTokens)
 		chains[cfg.Name] = &chainIndexer{
 			adapter:    adapter,
 			cfg:        cfg,
@@ -353,7 +353,7 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 		return di.indexRepo.UpsertState(ctx, ci.cfg.Name, int64(blockNum), blockHash.Hex())
 	}
 
-	// Scan block for ERC-20 transfers to our addresses
+	// Scan block for native + ERC-20 transfers to our addresses
 	events, err := ci.adapter.ScanBlockForTransfers(ctx, blockNum, watchSet)
 	if err != nil {
 		return fmt.Errorf("scan block %d: %w", blockNum, err)
@@ -369,6 +369,12 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 			continue
 		}
 
+		// Determine token symbol: native symbol for native transfers, ERC-20 symbol otherwise
+		tokenSymbol := ci.adapter.GetTokenSymbol(evt.TokenAddress)
+		if evt.IsNative {
+			tokenSymbol = ci.adapter.NativeSymbol()
+		}
+
 		deposit := &domain.Deposit{
 			ID:               uuid.New(),
 			IdempotencyKey:   fmt.Sprintf("%s:%s:%d", ci.cfg.Name, evt.TxHash.Hex(), evt.LogIndex),
@@ -380,9 +386,9 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 			FromAddress:      evt.From.Hex(),
 			ToAddress:        evt.To.Hex(),
 			TokenAddress:     evt.TokenAddress.Hex(),
-			TokenSymbol:      ci.adapter.GetTokenSymbol(evt.TokenAddress),
+			TokenSymbol:      tokenSymbol,
 			Amount:           evt.Amount,
-			Decimals:         18, // default for most ERC-20s
+			Decimals:         evt.Decimals,
 			State:            domain.DepositDetected,
 			Confirmations:    0,
 			RequiredConfs:    ci.cfg.Confirmations,
@@ -430,6 +436,7 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 			Str("to", evt.To.Hex()).
 			Str("token", deposit.TokenSymbol).
 			Str("amount", evt.Amount.String()).
+			Bool("native", evt.IsNative).
 			Int64("block", int64(evt.BlockNumber)).
 			Msg("deposit detected")
 	}
