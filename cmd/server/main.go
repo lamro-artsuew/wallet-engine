@@ -96,7 +96,7 @@ func main() {
 	// Master seed for HD derivation
 	// In production: fetch from Vault at vault:secret/wallet-engine/master-seed
 	masterSeed := []byte(envStr("MASTER_SEED", "DEVELOPMENT-SEED-DO-NOT-USE-IN-PRODUCTION"))
-	addrSvc := service.NewAddressService(addrRepo, hdRepo, masterSeed)
+	addrSvc := service.NewAddressService(pool, addrRepo, hdRepo, masterSeed)
 
 	// Ledger and withdrawal services
 	ledgerSvc := service.NewLedgerService(ledgerRepo)
