@@ -1,0 +1,125 @@
+# Wallet Engine Chain Configuration
+# Override per-chain RPC URLs via environment variables:
+#   ETH_RPC_URL, BSC_RPC_URL, POLYGON_RPC_URL, ARBITRUM_RPC_URL, OPTIMISM_RPC_URL, AVALANCHE_RPC_URL
+# Or set CHAINS_CONFIG_FILE=/path/to/custom-chains.yaml
+
+chains:
+  - name: ethereum
+    chain_id: 1
+    rpc_url: "http://erigon-eth.blockchain.svc:8545"
+    native_symbol: ETH
+    native_decimals: 18
+    block_time_seconds: 12
+    confirmations: 12
+    reorg_depth: 64
+    finality_type: probabilistic
+    rpc_timeout_seconds: 30
+    rpc_retries: 3
+    enabled: true
+    tracked_tokens:
+      - address: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+        symbol: USDT
+        decimals: 6
+      - address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        symbol: USDC
+        decimals: 6
+
+  - name: bsc
+    chain_id: 56
+    rpc_url: "http://erigon-bsc.blockchain.svc:8545"
+    native_symbol: BNB
+    native_decimals: 18
+    block_time_seconds: 3
+    confirmations: 15
+    reorg_depth: 32
+    finality_type: probabilistic
+    rpc_timeout_seconds: 30
+    rpc_retries: 3
+    enabled: true
+    tracked_tokens:
+      - address: "0x55d398326f99059fF775485246999027B3197955"
+        symbol: USDT
+        decimals: 18
+      - address: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"
+        symbol: USDC
+        decimals: 18
+
+  - name: polygon
+    chain_id: 137
+    rpc_url: "http://erigon-polygon.blockchain.svc:8545"
+    native_symbol: MATIC
+    native_decimals: 18
+    block_time_seconds: 2
+    confirmations: 64
+    reorg_depth: 128
+    finality_type: probabilistic
+    rpc_timeout_seconds: 30
+    rpc_retries: 3
+    enabled: true
+    tracked_tokens:
+      - address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
+        symbol: USDT
+        decimals: 6
+      - address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+        symbol: USDC
+        decimals: 6
+
+  - name: arbitrum
+    chain_id: 42161
+    rpc_url: "http://arbitrum.blockchain.svc:8547"
+    native_symbol: ETH
+    native_decimals: 18
+    block_time_seconds: 1
+    confirmations: 10
+    reorg_depth: 0
+    finality_type: l2-batch
+    rpc_timeout_seconds: 30
+    rpc_retries: 3
+    enabled: true
+    tracked_tokens:
+      - address: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"
+        symbol: USDT
+        decimals: 6
+      - address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+        symbol: USDC
+        decimals: 6
+
+  - name: optimism
+    chain_id: 10
+    rpc_url: "http://optimism.blockchain.svc:8545"
+    native_symbol: ETH
+    native_decimals: 18
+    block_time_seconds: 2
+    confirmations: 10
+    reorg_depth: 0
+    finality_type: l2-batch
+    rpc_timeout_seconds: 30
+    rpc_retries: 3
+    enabled: true
+    tracked_tokens:
+      - address: "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58"
+        symbol: USDT
+        decimals: 6
+      - address: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"
+        symbol: USDC
+        decimals: 6
+
+  - name: avalanche
+    chain_id: 43114
+    rpc_url: "http://avalanche.blockchain.svc:9650/ext/bc/C/rpc"
+    native_symbol: AVAX
+    native_decimals: 18
+    block_time_seconds: 2
+    confirmations: 12
+    reorg_depth: 0
+    finality_type: instant
+    rpc_timeout_seconds: 30
+    rpc_retries: 3
+    enabled: true
+    tracked_tokens:
+      - address: "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7"
+        symbol: USDT
+        decimals: 6
+      - address: "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"
+        symbol: USDC
+        decimals: 6

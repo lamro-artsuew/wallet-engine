@@ -30,10 +30,19 @@ func main() {
 	}
 
 	cfg := config.Load()
+
+	// Validate configuration
+	if err := cfg.Validate(); err != nil {
+		log.Fatal().Err(err).Msg("invalid configuration")
+	}
+
 	log.Info().
 		Int("port", cfg.Server.Port).
 		Int("metrics_port", cfg.Server.MetricsPort).
 		Int("chains", len(cfg.Chains)).
+		Bool("deposits", cfg.Features.DepositsEnabled).
+		Bool("withdrawals", cfg.Features.WithdrawalsEnabled).
+		Bool("indexer", cfg.Features.IndexerEnabled).
 		Msg("starting wallet-engine")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -98,12 +107,16 @@ func main() {
 	// Signer (MPC/HSM/local key management)
 	signer := service.NewSigner(cfg.Signer, walletRepo)
 
-	// Deposit indexer
+	// Deposit indexer (gated by feature flag)
 	indexer := service.NewDepositIndexer(cfg.Chains, depositRepo, addrRepo, indexRepo, producer)
-	if err := indexer.Start(ctx); err != nil {
-		log.Fatal().Err(err).Msg("failed to start deposit indexer")
+	if cfg.Features.IndexerEnabled {
+		if err := indexer.Start(ctx); err != nil {
+			log.Fatal().Err(err).Msg("failed to start deposit indexer")
+		}
+		defer indexer.Stop()
+	} else {
+		log.Warn().Msg("deposit indexer disabled by feature flag")
 	}
-	defer indexer.Stop()
 
 	// Blacklist service (needs EVM adapters from indexer)
 	blacklistSvc := service.NewBlacklistService(blacklistRepo, indexer.GetEVMAdapters())
@@ -176,6 +189,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		"migrations/003_blacklist.sql",
 		"migrations/004_rebalance.sql",
 		"migrations/005_fiat_bridge.sql",
+		"migrations/006_ledger_hardening.sql",
 	}
 	altPrefix := "/app/"
 

@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/lamro-artsuew/wallet-engine/internal/config"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -44,14 +45,19 @@ type TransferEvent struct {
 
 // EVMAdapter connects to an EVM-compatible chain via JSON-RPC
 type EVMAdapter struct {
-	name          string
-	chainID       int64
-	rpcURL        string
-	nativeSymbol  string
-	client        *ethclient.Client
-	trackedTokens map[common.Address]TrackedToken // address → token metadata
-	mu            sync.RWMutex
-	logger        zerolog.Logger
+	name           string
+	chainID        int64
+	rpcURL         string
+	rpcURLs        []string // failover RPC endpoints
+	rpcIndex       int      // current failover index
+	nativeSymbol   string
+	nativeDecimals int
+	client         *ethclient.Client
+	trackedTokens  map[common.Address]TrackedToken // address → token metadata
+	rpcTimeout     time.Duration
+	rpcRetries     int
+	mu             sync.RWMutex
+	logger         zerolog.Logger
 }
 
 // Known token decimals for major stablecoins (USDT/USDC use 6 on most chains)
@@ -63,58 +69,121 @@ var knownDecimals = map[string]int{
 }
 
 // NewEVMAdapter creates a new EVM chain adapter
-func NewEVMAdapter(name string, chainID int64, rpcURL string, nativeSymbol string, trackedTokens map[string]string) *EVMAdapter {
+func NewEVMAdapter(name string, chainID int64, rpcURL string, nativeSymbol string, trackedTokens []config.TokenConfig, opts ...EVMAdapterOption) *EVMAdapter {
 	tokens := make(map[common.Address]TrackedToken, len(trackedTokens))
-	for addr, symbol := range trackedTokens {
-		decimals := 18 // default
-		if d, ok := knownDecimals[symbol]; ok {
-			decimals = d
+	for _, tok := range trackedTokens {
+		decimals := tok.Decimals
+		if decimals == 0 {
+			// Fallback to known decimals if not specified
+			if d, ok := knownDecimals[tok.Symbol]; ok {
+				decimals = d
+			} else {
+				decimals = 18
+			}
 		}
-		tokens[common.HexToAddress(addr)] = TrackedToken{Symbol: symbol, Decimals: decimals}
+		tokens[common.HexToAddress(tok.Address)] = TrackedToken{Symbol: tok.Symbol, Decimals: decimals}
 	}
-	return &EVMAdapter{
-		name:          name,
-		chainID:       chainID,
-		rpcURL:        rpcURL,
-		nativeSymbol:  nativeSymbol,
-		trackedTokens: tokens,
-		logger:        log.With().Str("chain", name).Logger(),
+
+	nativeDecimals := 18
+	a := &EVMAdapter{
+		name:           name,
+		chainID:        chainID,
+		rpcURL:         rpcURL,
+		nativeSymbol:   nativeSymbol,
+		nativeDecimals: nativeDecimals,
+		trackedTokens:  tokens,
+		rpcTimeout:     30 * time.Second,
+		rpcRetries:     3,
+		logger:         log.With().Str("chain", name).Logger(),
+	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
+}
+
+// EVMAdapterOption configures optional adapter parameters
+type EVMAdapterOption func(*EVMAdapter)
+
+func WithRPCURLs(urls []string) EVMAdapterOption {
+	return func(a *EVMAdapter) { a.rpcURLs = urls }
+}
+
+func WithNativeDecimals(d int) EVMAdapterOption {
+	return func(a *EVMAdapter) {
+		if d > 0 {
+			a.nativeDecimals = d
+		}
 	}
 }
 
-// Connect establishes the RPC connection
+func WithRPCTimeout(d time.Duration) EVMAdapterOption {
+	return func(a *EVMAdapter) {
+		if d > 0 {
+			a.rpcTimeout = d
+		}
+	}
+}
+
+func WithRPCRetries(n int) EVMAdapterOption {
+	return func(a *EVMAdapter) {
+		if n > 0 {
+			a.rpcRetries = n
+		}
+	}
+}
+
+// Connect establishes the RPC connection, trying failover URLs if primary fails
 func (a *EVMAdapter) Connect(ctx context.Context) error {
-	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
+	urls := []string{a.rpcURL}
+	urls = append(urls, a.rpcURLs...)
 
-	client, err := ethclient.DialContext(connectCtx, a.rpcURL)
-	if err != nil {
-		return fmt.Errorf("failed to connect to %s at %s: %w", a.name, a.rpcURL, err)
+	var lastErr error
+	for _, rpcURL := range urls {
+		if rpcURL == "" {
+			continue
+		}
+		connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		client, err := ethclient.DialContext(connectCtx, rpcURL)
+		cancel()
+		if err != nil {
+			lastErr = err
+			a.logger.Warn().Str("rpc", sanitizeURL(rpcURL)).Err(err).Msg("RPC connect failed, trying next")
+			continue
+		}
+
+		verifyCtx, verifyCancel := context.WithTimeout(ctx, 10*time.Second)
+		cid, err := client.ChainID(verifyCtx)
+		verifyCancel()
+		if err != nil {
+			client.Close()
+			lastErr = err
+			a.logger.Warn().Str("rpc", sanitizeURL(rpcURL)).Err(err).Msg("chain ID check failed, trying next")
+			continue
+		}
+
+		if cid.Int64() != a.chainID {
+			client.Close()
+			lastErr = fmt.Errorf("chain ID mismatch for %s: expected %d, got %d", a.name, a.chainID, cid.Int64())
+			continue
+		}
+
+		a.mu.Lock()
+		if a.client != nil {
+			a.client.Close()
+		}
+		a.client = client
+		a.rpcURL = rpcURL
+		a.mu.Unlock()
+
+		a.logger.Info().
+			Str("rpc", a.SanitizeRPCURL()).
+			Int64("chain_id", a.chainID).
+			Msg("connected to chain")
+		return nil
 	}
 
-	// Verify chain ID
-	cid, err := client.ChainID(connectCtx)
-	if err != nil {
-		client.Close()
-		return fmt.Errorf("failed to get chain ID from %s: %w", a.name, err)
-	}
-	if cid.Int64() != a.chainID {
-		client.Close()
-		return fmt.Errorf("chain ID mismatch for %s: expected %d, got %d", a.name, a.chainID, cid.Int64())
-	}
-
-	a.mu.Lock()
-	if a.client != nil {
-		a.client.Close()
-	}
-	a.client = client
-	a.mu.Unlock()
-
-	a.logger.Info().
-		Str("rpc", a.SanitizeRPCURL()).
-		Int64("chain_id", a.chainID).
-		Msg("connected to chain")
-	return nil
+	return fmt.Errorf("failed to connect to %s (tried %d endpoints): %w", a.name, len(urls), lastErr)
 }
 
 // getClient returns the current client, reconnecting if necessary
@@ -225,7 +294,7 @@ func (a *EVMAdapter) ScanBlockForTransfers(ctx context.Context, blockNum uint64,
 			To:           *to,
 			TokenAddress: common.Address{}, // zero = native
 			Amount:       tx.Value(),
-			Decimals:     18, // all EVM native tokens use 18 decimals
+			Decimals:     a.nativeDecimals,
 			IsNative:     true,
 		})
 	}
@@ -347,13 +416,18 @@ func (a *EVMAdapter) Health(ctx context.Context) error {
 
 // SanitizeRPCURL returns the RPC URL with credentials masked
 func (a *EVMAdapter) SanitizeRPCURL() string {
-	u, err := url.Parse(a.rpcURL)
+	return sanitizeURL(a.rpcURL)
+}
+
+// sanitizeURL masks credentials in an RPC URL
+func sanitizeURL(rpcURL string) string {
+	u, err := url.Parse(rpcURL)
 	if err != nil || u.User == nil {
-		if strings.Contains(a.rpcURL, "@") {
-			parts := strings.SplitN(a.rpcURL, "@", 2)
+		if strings.Contains(rpcURL, "@") {
+			parts := strings.SplitN(rpcURL, "@", 2)
 			return "***@" + parts[1]
 		}
-		return a.rpcURL
+		return rpcURL
 	}
 	u.User = url.User("***")
 	return u.String()

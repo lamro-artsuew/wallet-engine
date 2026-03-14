@@ -80,7 +80,13 @@ func NewDepositIndexer(
 		if !cfg.Enabled {
 			continue
 		}
-		adapter := chain.NewEVMAdapter(cfg.Name, cfg.ChainID, cfg.RPCURL, cfg.NativeSymbol, cfg.TrackedTokens)
+		adapter := chain.NewEVMAdapter(
+			cfg.Name, cfg.ChainID, cfg.RPCURL, cfg.NativeSymbol, cfg.TrackedTokens,
+			chain.WithRPCURLs(cfg.RPCURLs),
+			chain.WithNativeDecimals(cfg.NativeDecimals),
+			chain.WithRPCTimeout(time.Duration(cfg.RPCTimeout)*time.Second),
+			chain.WithRPCRetries(cfg.RPCRetries),
+		)
 		chains[cfg.Name] = &chainIndexer{
 			adapter:    adapter,
 			cfg:        cfg,

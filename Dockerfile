@@ -19,6 +19,7 @@ RUN adduser -D -u 1000 appuser
 WORKDIR /app
 COPY --from=builder /wallet-engine .
 COPY migrations/ ./migrations/
+COPY config/ ./config/
 
 USER appuser
 
