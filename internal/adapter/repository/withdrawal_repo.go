@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lamro-artsuew/wallet-engine/internal/domain"
+	"github.com/lamro-artsuew/wallet-engine/internal/numeric"
 )
 
 // WithdrawalRepo handles withdrawal persistence
@@ -231,14 +232,16 @@ func scanWithdrawalRow(scanner interface {
 		return nil, err
 	}
 	var parseErr error
-	w.Amount, parseErr = parseBigInt(amountStr)
+	w.Amount, parseErr = numeric.ParseBigInt(amountStr)
 	if parseErr != nil {
 		return nil, fmt.Errorf("parse amount for withdrawal %s: %w", w.ID, parseErr)
 	}
-	if err := parseOptionalBigInt(gasPriceStr, &w.GasPrice); err != nil {
+	w.GasPrice, err = numeric.ParseOptionalBigInt(gasPriceStr)
+	if err != nil {
 		return nil, fmt.Errorf("parse gas_price for withdrawal %s: %w", w.ID, err)
 	}
-	if err := parseOptionalBigInt(feeStr, &w.Fee); err != nil {
+	w.Fee, err = numeric.ParseOptionalBigInt(feeStr)
+	if err != nil {
 		return nil, fmt.Errorf("parse fee for withdrawal %s: %w", w.ID, err)
 	}
 	return w, nil

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lamro-artsuew/wallet-engine/internal/domain"
+	"github.com/lamro-artsuew/wallet-engine/internal/numeric"
 )
 
 // VelocityRepo handles velocity limit and withdrawal attempt persistence
@@ -106,13 +107,16 @@ func (r *VelocityRepo) FindLimitByID(ctx context.Context, id uuid.UUID) (*domain
 		}
 		return nil, err
 	}
-	if err := parseOptionalBigInt(maxTxStr, &vl.MaxAmountPerTx); err != nil {
+	vl.MaxAmountPerTx, err = numeric.ParseOptionalBigInt(maxTxStr)
+	if err != nil {
 		return nil, fmt.Errorf("parse max_amount_per_tx for %s: %w", id, err)
 	}
-	if err := parseOptionalBigInt(maxHourStr, &vl.MaxAmountPerHour); err != nil {
+	vl.MaxAmountPerHour, err = numeric.ParseOptionalBigInt(maxHourStr)
+	if err != nil {
 		return nil, fmt.Errorf("parse max_amount_per_hour for %s: %w", id, err)
 	}
-	if err := parseOptionalBigInt(maxDayStr, &vl.MaxAmountPerDay); err != nil {
+	vl.MaxAmountPerDay, err = numeric.ParseOptionalBigInt(maxDayStr)
+	if err != nil {
 		return nil, fmt.Errorf("parse max_amount_per_day for %s: %w", id, err)
 	}
 	return vl, nil
@@ -288,13 +292,16 @@ func scanVelocityLimits(rows pgx.Rows) ([]*domain.VelocityLimit, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := parseOptionalBigInt(maxTxStr, &vl.MaxAmountPerTx); err != nil {
+		vl.MaxAmountPerTx, err = numeric.ParseOptionalBigInt(maxTxStr)
+		if err != nil {
 			return nil, fmt.Errorf("parse max_amount_per_tx for limit %s: %w", vl.ID, err)
 		}
-		if err := parseOptionalBigInt(maxHourStr, &vl.MaxAmountPerHour); err != nil {
+		vl.MaxAmountPerHour, err = numeric.ParseOptionalBigInt(maxHourStr)
+		if err != nil {
 			return nil, fmt.Errorf("parse max_amount_per_hour for limit %s: %w", vl.ID, err)
 		}
-		if err := parseOptionalBigInt(maxDayStr, &vl.MaxAmountPerDay); err != nil {
+		vl.MaxAmountPerDay, err = numeric.ParseOptionalBigInt(maxDayStr)
+		if err != nil {
 			return nil, fmt.Errorf("parse max_amount_per_day for limit %s: %w", vl.ID, err)
 		}
 		limits = append(limits, vl)

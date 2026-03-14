@@ -3,13 +3,13 @@ package repository
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lamro-artsuew/wallet-engine/internal/domain"
+	"github.com/lamro-artsuew/wallet-engine/internal/numeric"
 )
 
 // DepositRepo handles deposit persistence
@@ -174,13 +174,30 @@ func scanDeposits(rows pgx.Rows) ([]*domain.Deposit, error) {
 		if err != nil {
 			return nil, err
 		}
-		d.Amount = new(big.Int)
-		d.Amount.SetString(amountStr, 10)
+		d.Amount, err = numeric.ParseBigInt(amountStr)
+		if err != nil {
+			return nil, fmt.Errorf("parse amount for deposit %s: %w", d.ID, err)
+		}
 		d.ConfirmedAt = confirmedAt
 		d.SweptAt = sweptAt
 		deposits = append(deposits, d)
 	}
 	return deposits, rows.Err()
+}
+
+// SetBlacklistFlag updates the blacklist flag for a deposit.
+// This belongs in DepositRepo (not BlacklistRepo) because it writes to the deposits table.
+func (r *DepositRepo) SetBlacklistFlag(ctx context.Context, id uuid.UUID, isBlacklisted bool) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE deposits SET is_from_blacklisted = $1, updated_at = NOW() WHERE id = $2
+	`, isBlacklisted, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("deposit %s not found", id)
+	}
+	return nil
 }
 
 // DepositAddressRepo handles deposit address persistence

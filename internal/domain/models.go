@@ -228,14 +228,15 @@ type SweepRecord struct {
 
 // BlacklistedAddress represents a known bad address
 type BlacklistedAddress struct {
-	ID         uuid.UUID  `json:"id" db:"id"`
-	Chain      string     `json:"chain" db:"chain"`
-	Address    string     `json:"address" db:"address"`
-	Source     string     `json:"source" db:"source"`
-	Reason     *string    `json:"reason,omitempty" db:"reason"`
-	DetectedAt time.Time  `json:"detected_at" db:"detected_at"`
-	IsActive   bool       `json:"is_active" db:"is_active"`
-	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+	ID         uuid.UUID `json:"id" db:"id"`
+	Chain      string    `json:"chain" db:"chain"`
+	Address    string    `json:"address" db:"address"`
+	Source     string    `json:"source" db:"source"`
+	Reason     *string   `json:"reason,omitempty" db:"reason"`
+	DetectedAt time.Time `json:"detected_at" db:"detected_at"`
+	IsActive   bool      `json:"is_active" db:"is_active"`
+	CreatedAt  time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // StablecoinContract represents a monitored stablecoin
@@ -272,6 +273,7 @@ type BlacklistCheckResult struct {
 	Sources       []string        `json:"sources"`
 	Reasons       []string        `json:"reasons"`
 	FreezeStatus  map[string]bool `json:"freeze_status"`
+	CheckedAt     time.Time       `json:"checked_at"`
 }
 
 // RebalancePolicy defines thresholds for automatic tier rebalancing

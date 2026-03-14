@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/lamro-artsuew/wallet-engine/internal/domain"
+	"github.com/lamro-artsuew/wallet-engine/internal/numeric"
 )
 
 // ErrStateConflict indicates a state transition failed because the current state
@@ -48,7 +49,7 @@ func (r *RebalanceRepo) GetPolicy(ctx context.Context, chain, token string) (*do
 		return nil, err
 	}
 	var parseErr error
-	p.MinRebalanceAmount, parseErr = parseBigInt(minAmountStr)
+	p.MinRebalanceAmount, parseErr = numeric.ParseBigInt(minAmountStr)
 	if parseErr != nil {
 		return nil, fmt.Errorf("parse min_rebalance_amount for %s/%s: %w", chain, token, parseErr)
 	}
@@ -294,7 +295,7 @@ func scanPolicies(rows pgx.Rows) ([]*domain.RebalancePolicy, error) {
 			return nil, err
 		}
 		var parseErr error
-		p.MinRebalanceAmount, parseErr = parseBigInt(minAmountStr)
+		p.MinRebalanceAmount, parseErr = numeric.ParseBigInt(minAmountStr)
 		if parseErr != nil {
 			return nil, fmt.Errorf("parse min_rebalance_amount for %s/%s: %w", p.Chain, p.TokenSymbol, parseErr)
 		}
@@ -320,7 +321,7 @@ func scanRebalanceOp(scanner interface {
 		return nil, err
 	}
 	var parseErr error
-	op.Amount, parseErr = parseBigInt(amountStr)
+	op.Amount, parseErr = numeric.ParseBigInt(amountStr)
 	if parseErr != nil {
 		return nil, fmt.Errorf("parse amount for rebalance op %s: %w", op.ID, parseErr)
 	}
