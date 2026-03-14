@@ -1067,9 +1067,21 @@ type CreateVelocityLimitRequest struct {
 	IsActive            *bool    `json:"is_active"`
 }
 
-// ListVelocityLimits returns all velocity limits
+// ListVelocityLimits returns velocity limits with pagination
 func (h *Handler) ListVelocityLimits(c *gin.Context) {
-	limits, err := h.velocitySvc.ListLimits(c.Request.Context())
+	limit := 100
+	offset := 0
+	if v := c.Query("limit"); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &limit); err != nil || limit < 1 {
+			limit = 100
+		}
+	}
+	if v := c.Query("offset"); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &offset); err != nil || offset < 0 {
+			offset = 0
+		}
+	}
+	limits, err := h.velocitySvc.ListLimits(c.Request.Context(), limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

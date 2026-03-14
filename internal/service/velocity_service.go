@@ -35,8 +35,9 @@ func NewVelocityService(velocityRepo *repository.VelocityRepo, withdrawalRepo *r
 	}
 }
 
-// CheckWithdrawal evaluates all applicable velocity limits for a withdrawal.
-// Returns a VelocityCheckResult indicating whether the withdrawal is allowed.
+// CheckWithdrawal evaluates ALL applicable velocity limits for a withdrawal.
+// Every matching limit (USER, WORKSPACE, CHAIN, GLOBAL) is checked — most specific first.
+// The first failing limit short-circuits and rejects. All limits must pass for approval.
 func (s *VelocityService) CheckWithdrawal(ctx context.Context, w *domain.Withdrawal, sourceIP string, countryCode string) (*domain.VelocityCheckResult, error) {
 	limits, err := s.velocityRepo.FindLimits(ctx, w.WorkspaceID, w.UserID, w.Chain, w.TokenSymbol)
 	if err != nil {
@@ -108,7 +109,7 @@ func (s *VelocityService) CheckWithdrawal(ctx context.Context, w *domain.Withdra
 
 		// d. Hourly count limit
 		if limit.MaxCountPerHour != nil {
-			hourlyCount, err := s.velocityRepo.CountWithdrawalsInWindow(ctx, w.UserID, w.Chain, oneHourAgo)
+			hourlyCount, err := s.velocityRepo.CountWithdrawalsInWindow(ctx, w.UserID, w.Chain, w.TokenSymbol, oneHourAgo)
 			if err != nil {
 				return nil, fmt.Errorf("query hourly count: %w", err)
 			}
@@ -123,7 +124,7 @@ func (s *VelocityService) CheckWithdrawal(ctx context.Context, w *domain.Withdra
 
 		// e. Daily count limit
 		if limit.MaxCountPerDay != nil {
-			dailyCount, err := s.velocityRepo.CountWithdrawalsInWindow(ctx, w.UserID, w.Chain, oneDayAgo)
+			dailyCount, err := s.velocityRepo.CountWithdrawalsInWindow(ctx, w.UserID, w.Chain, w.TokenSymbol, oneDayAgo)
 			if err != nil {
 				return nil, fmt.Errorf("query daily count: %w", err)
 			}
@@ -204,9 +205,9 @@ func (s *VelocityService) CheckWithdrawal(ctx context.Context, w *domain.Withdra
 	return result, nil
 }
 
-// ListLimits returns all velocity limits for admin listing
-func (s *VelocityService) ListLimits(ctx context.Context) ([]*domain.VelocityLimit, error) {
-	return s.velocityRepo.FindAllLimits(ctx)
+// ListLimits returns velocity limits with pagination for admin listing
+func (s *VelocityService) ListLimits(ctx context.Context, limit, offset int) ([]*domain.VelocityLimit, error) {
+	return s.velocityRepo.FindAllLimits(ctx, limit, offset)
 }
 
 // CreateLimit creates a new velocity limit

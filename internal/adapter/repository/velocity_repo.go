@@ -22,8 +22,9 @@ func NewVelocityRepo(pool *pgxpool.Pool) *VelocityRepo {
 }
 
 // FindLimits returns all applicable velocity limits ordered by most specific first.
-// It matches GLOBAL, plus WORKSPACE/USER/CHAIN scopes where scope_id matches,
-// and filters by chain/token (NULL = all).
+// Enforcement model: ALL matching limits are returned and ALL must pass.
+// Ordering is most-specific-first (USER > WORKSPACE > CHAIN > GLOBAL) so the
+// service layer can short-circuit on the first rejection.
 func (r *VelocityRepo) FindLimits(ctx context.Context, workspaceID uuid.UUID, userID uuid.UUID, chain string, token string) ([]*domain.VelocityLimit, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, scope, scope_id, chain, token_symbol,
@@ -56,8 +57,14 @@ func (r *VelocityRepo) FindLimits(ctx context.Context, workspaceID uuid.UUID, us
 	return scanVelocityLimits(rows)
 }
 
-// FindAllLimits returns all velocity limits (for admin listing)
-func (r *VelocityRepo) FindAllLimits(ctx context.Context) ([]*domain.VelocityLimit, error) {
+// FindAllLimits returns velocity limits with pagination (for admin listing)
+func (r *VelocityRepo) FindAllLimits(ctx context.Context, limit, offset int) ([]*domain.VelocityLimit, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, scope, scope_id, chain, token_symbol,
 			max_amount_per_tx, max_amount_per_hour, max_amount_per_day,
@@ -66,7 +73,8 @@ func (r *VelocityRepo) FindAllLimits(ctx context.Context) ([]*domain.VelocityLim
 			is_active, created_at, updated_at
 		FROM velocity_limits
 		ORDER BY created_at DESC
-	`)
+		LIMIT $1 OFFSET $2
+	`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -76,26 +84,38 @@ func (r *VelocityRepo) FindAllLimits(ctx context.Context) ([]*domain.VelocityLim
 
 // FindLimitByID returns a single velocity limit
 func (r *VelocityRepo) FindLimitByID(ctx context.Context, id uuid.UUID) (*domain.VelocityLimit, error) {
-	rows, err := r.pool.Query(ctx, `
+	vl := &domain.VelocityLimit{}
+	var maxTxStr, maxHourStr, maxDayStr *string
+	err := r.pool.QueryRow(ctx, `
 		SELECT id, scope, scope_id, chain, token_symbol,
 			max_amount_per_tx, max_amount_per_hour, max_amount_per_day,
 			max_count_per_hour, max_count_per_day, cooldown_seconds,
 			geo_allowed_countries, geo_blocked_countries,
 			is_active, created_at, updated_at
 		FROM velocity_limits WHERE id = $1
-	`, id)
+	`, id).Scan(
+		&vl.ID, &vl.Scope, &vl.ScopeID, &vl.Chain, &vl.TokenSymbol,
+		&maxTxStr, &maxHourStr, &maxDayStr,
+		&vl.MaxCountPerHour, &vl.MaxCountPerDay, &vl.CooldownSeconds,
+		&vl.GeoAllowedCountries, &vl.GeoBlockedCountries,
+		&vl.IsActive, &vl.CreatedAt, &vl.UpdatedAt,
+	)
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("velocity limit %s not found", id)
+		}
 		return nil, err
 	}
-	defer rows.Close()
-	limits, err := scanVelocityLimits(rows)
-	if err != nil {
-		return nil, err
+	if err := parseOptionalBigInt(maxTxStr, &vl.MaxAmountPerTx); err != nil {
+		return nil, fmt.Errorf("parse max_amount_per_tx for %s: %w", id, err)
 	}
-	if len(limits) == 0 {
-		return nil, fmt.Errorf("velocity limit %s not found", id)
+	if err := parseOptionalBigInt(maxHourStr, &vl.MaxAmountPerHour); err != nil {
+		return nil, fmt.Errorf("parse max_amount_per_hour for %s: %w", id, err)
 	}
-	return limits[0], nil
+	if err := parseOptionalBigInt(maxDayStr, &vl.MaxAmountPerDay); err != nil {
+		return nil, fmt.Errorf("parse max_amount_per_day for %s: %w", id, err)
+	}
+	return vl, nil
 }
 
 // CreateLimit inserts a new velocity limit
@@ -190,6 +210,11 @@ func (r *VelocityRepo) LogAttempt(ctx context.Context, a *domain.WithdrawalAttem
 	if a.WithdrawalID != uuid.Nil {
 		withdrawalID = &a.WithdrawalID
 	}
+	// Nil guard: rejected attempts may have nil Amount (malformed request)
+	amountStr := "0"
+	if a.Amount != nil {
+		amountStr = a.Amount.String()
+	}
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO withdrawal_attempts (
 			id, withdrawal_id, workspace_id, user_id, chain, token_symbol,
@@ -197,19 +222,21 @@ func (r *VelocityRepo) LogAttempt(ctx context.Context, a *domain.WithdrawalAttem
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 	`,
 		a.ID, withdrawalID, a.WorkspaceID, a.UserID, a.Chain, a.TokenSymbol,
-		a.Amount.String(), a.SourceIP, a.CountryCode,
+		amountStr, a.SourceIP, a.CountryCode,
 		a.VelocityCheckPassed, a.RejectionReason,
 	)
 	return err
 }
 
-// CountWithdrawalsInWindow counts successful withdrawal attempts for a user/chain since a given time
-func (r *VelocityRepo) CountWithdrawalsInWindow(ctx context.Context, userID uuid.UUID, chain string, since time.Time) (int, error) {
+// CountWithdrawalsInWindow counts successful withdrawal attempts for a user/chain/token
+// since a given time. Token-scoped to be consistent with SumWithdrawalsInWindow.
+func (r *VelocityRepo) CountWithdrawalsInWindow(ctx context.Context, userID uuid.UUID, chain string, token string, since time.Time) (int, error) {
 	var count int
 	err := r.pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM withdrawal_attempts
-		WHERE user_id = $1 AND chain = $2 AND created_at >= $3 AND velocity_check_passed = TRUE
-	`, userID, chain, since).Scan(&count)
+		WHERE user_id = $1 AND chain = $2 AND token_symbol = $3
+		  AND created_at >= $4 AND velocity_check_passed = TRUE
+	`, userID, chain, token, since).Scan(&count)
 	return count, err
 }
 
@@ -226,7 +253,9 @@ func (r *VelocityRepo) SumWithdrawalsInWindow(ctx context.Context, userID uuid.U
 	}
 	result := new(big.Int)
 	if sumStr != nil {
-		result.SetString(*sumStr, 10)
+		if _, ok := result.SetString(*sumStr, 10); !ok {
+			return nil, fmt.Errorf("invalid withdrawal sum from DB: %q", *sumStr)
+		}
 	}
 	return result, nil
 }
@@ -244,6 +273,20 @@ func (r *VelocityRepo) LastWithdrawalTime(ctx context.Context, userID uuid.UUID,
 	return t, nil
 }
 
+// parseOptionalBigInt parses a nullable string into an optional big.Int,
+// returning an error if the string is present but malformed.
+func parseOptionalBigInt(s *string, target **big.Int) error {
+	if s == nil {
+		return nil
+	}
+	v := new(big.Int)
+	if _, ok := v.SetString(*s, 10); !ok {
+		return fmt.Errorf("invalid numeric value: %q", *s)
+	}
+	*target = v
+	return nil
+}
+
 func scanVelocityLimits(rows pgx.Rows) ([]*domain.VelocityLimit, error) {
 	var limits []*domain.VelocityLimit
 	for rows.Next() {
@@ -259,17 +302,14 @@ func scanVelocityLimits(rows pgx.Rows) ([]*domain.VelocityLimit, error) {
 		if err != nil {
 			return nil, err
 		}
-		if maxTxStr != nil {
-			vl.MaxAmountPerTx = new(big.Int)
-			vl.MaxAmountPerTx.SetString(*maxTxStr, 10)
+		if err := parseOptionalBigInt(maxTxStr, &vl.MaxAmountPerTx); err != nil {
+			return nil, fmt.Errorf("parse max_amount_per_tx for limit %s: %w", vl.ID, err)
 		}
-		if maxHourStr != nil {
-			vl.MaxAmountPerHour = new(big.Int)
-			vl.MaxAmountPerHour.SetString(*maxHourStr, 10)
+		if err := parseOptionalBigInt(maxHourStr, &vl.MaxAmountPerHour); err != nil {
+			return nil, fmt.Errorf("parse max_amount_per_hour for limit %s: %w", vl.ID, err)
 		}
-		if maxDayStr != nil {
-			vl.MaxAmountPerDay = new(big.Int)
-			vl.MaxAmountPerDay.SetString(*maxDayStr, 10)
+		if err := parseOptionalBigInt(maxDayStr, &vl.MaxAmountPerDay); err != nil {
+			return nil, fmt.Errorf("parse max_amount_per_day for limit %s: %w", vl.ID, err)
 		}
 		limits = append(limits, vl)
 	}
