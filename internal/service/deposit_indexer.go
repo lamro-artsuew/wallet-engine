@@ -3,10 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/google/uuid"
 	"github.com/lamro-artsuew/wallet-engine/internal/adapter/chain"
 	"github.com/lamro-artsuew/wallet-engine/internal/adapter/messaging"
@@ -60,10 +60,10 @@ type DepositIndexer struct {
 }
 
 type chainIndexer struct {
-	adapter       *chain.EVMAdapter
+	adapter       chain.ChainAdapter
 	cfg           config.ChainConfig
 	logger        zerolog.Logger
-	watchAddrs    map[common.Address]*domain.DepositAddress
+	watchAddrs    map[string]*domain.DepositAddress // canonical address string → deposit address
 	watchAddrsMu  sync.RWMutex
 }
 
@@ -80,18 +80,28 @@ func NewDepositIndexer(
 		if !cfg.Enabled {
 			continue
 		}
-		adapter := chain.NewEVMAdapter(
-			cfg.Name, cfg.ChainID, cfg.RPCURL, cfg.NativeSymbol, cfg.TrackedTokens,
-			chain.WithRPCURLs(cfg.RPCURLs),
-			chain.WithNativeDecimals(cfg.NativeDecimals),
-			chain.WithRPCTimeout(time.Duration(cfg.RPCTimeout)*time.Second),
-			chain.WithRPCRetries(cfg.RPCRetries),
-		)
+		var adapter chain.ChainAdapter
+		switch cfg.ChainType {
+		case "tron":
+			opts := []chain.TRONAdapterOption{}
+			if cfg.APIKey != "" {
+				opts = append(opts, chain.WithTRONAPIKey(cfg.APIKey))
+			}
+			adapter = chain.NewTRONAdapter(cfg.Name, cfg.RPCURL, cfg.TrackedTokens, opts...)
+		default: // "evm" or unset
+			adapter = chain.NewEVMAdapter(
+				cfg.Name, cfg.ChainID, cfg.RPCURL, cfg.NativeSymbol, cfg.TrackedTokens,
+				chain.WithRPCURLs(cfg.RPCURLs),
+				chain.WithNativeDecimals(cfg.NativeDecimals),
+				chain.WithRPCTimeout(time.Duration(cfg.RPCTimeout)*time.Second),
+				chain.WithRPCRetries(cfg.RPCRetries),
+			)
+		}
 		chains[cfg.Name] = &chainIndexer{
 			adapter:    adapter,
 			cfg:        cfg,
 			logger:     log.With().Str("chain", cfg.Name).Logger(),
-			watchAddrs: make(map[common.Address]*domain.DepositAddress),
+			watchAddrs: make(map[string]*domain.DepositAddress),
 		}
 	}
 
@@ -165,19 +175,22 @@ func (di *DepositIndexer) Stop() {
 }
 
 // AddWatchAddress adds an address to the watch set for a chain
-func (di *DepositIndexer) AddWatchAddress(chain string, addr common.Address, da *domain.DepositAddress) {
-	if ci, ok := di.chains[chain]; ok {
+func (di *DepositIndexer) AddWatchAddress(chainName string, addr string, da *domain.DepositAddress) {
+	if ci, ok := di.chains[chainName]; ok {
 		ci.watchAddrsMu.Lock()
-		ci.watchAddrs[addr] = da
+		ci.watchAddrs[strings.ToLower(addr)] = da
 		ci.watchAddrsMu.Unlock()
 	}
 }
 
-// GetEVMAdapters returns the EVM adapters for use by other services
+// GetEVMAdapters returns EVM-specific adapters for services that need them (e.g., BlacklistService).
+// TRON and other non-EVM chains are excluded.
 func (di *DepositIndexer) GetEVMAdapters() map[string]*chain.EVMAdapter {
-	adapters := make(map[string]*chain.EVMAdapter, len(di.chains))
+	adapters := make(map[string]*chain.EVMAdapter)
 	for name, ci := range di.chains {
-		adapters[name] = ci.adapter
+		if evm, ok := ci.adapter.(*chain.EVMAdapter); ok {
+			adapters[name] = evm
+		}
 	}
 	return adapters
 }
@@ -195,7 +208,7 @@ func (di *DepositIndexer) refreshWatchAddresses(ctx context.Context, ci *chainIn
 	ci.watchAddrsMu.Lock()
 	defer ci.watchAddrsMu.Unlock()
 	for _, a := range addrs {
-		ci.watchAddrs[common.HexToAddress(a.Address)] = a
+		ci.watchAddrs[strings.ToLower(a.Address)] = a
 	}
 	ci.logger.Info().Int("addresses", len(ci.watchAddrs)).Msg("loaded watch addresses")
 	return nil
@@ -342,9 +355,9 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 		scanDuration.WithLabelValues(ci.cfg.Name).Observe(time.Since(start).Seconds())
 	}()
 
-	// Build current watch set
+	// Build current watch set (string-based, chain-agnostic)
 	ci.watchAddrsMu.RLock()
-	watchSet := make(map[common.Address]bool, len(ci.watchAddrs))
+	watchSet := make(map[string]bool, len(ci.watchAddrs))
 	for addr := range ci.watchAddrs {
 		watchSet[addr] = true
 	}
@@ -352,15 +365,15 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 
 	if len(watchSet) == 0 {
 		// No addresses to watch, just update cursor
-		blockHash, err := ci.adapter.GetBlockHash(ctx, blockNum)
+		blockHash, err := ci.adapter.GetBlockHashHex(ctx, blockNum)
 		if err != nil {
 			return err
 		}
-		return di.indexRepo.UpsertState(ctx, ci.cfg.Name, int64(blockNum), blockHash.Hex())
+		return di.indexRepo.UpsertState(ctx, ci.cfg.Name, int64(blockNum), blockHash)
 	}
 
-	// Scan block for native + ERC-20 transfers to our addresses
-	events, err := ci.adapter.ScanBlockForTransfers(ctx, blockNum, watchSet)
+	// Scan block for transfers to our addresses (chain-agnostic interface)
+	events, err := ci.adapter.ScanBlockForDeposits(ctx, blockNum, watchSet)
 	if err != nil {
 		return fmt.Errorf("scan block %d: %w", blockNum, err)
 	}
@@ -368,30 +381,30 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 	// Process detected transfers
 	for _, evt := range events {
 		ci.watchAddrsMu.RLock()
-		da := ci.watchAddrs[evt.To]
+		da := ci.watchAddrs[strings.ToLower(evt.To)]
 		ci.watchAddrsMu.RUnlock()
 
 		if da == nil {
 			continue
 		}
 
-		// Determine token symbol: native symbol for native transfers, ERC-20 symbol otherwise
-		tokenSymbol := ci.adapter.GetTokenSymbol(evt.TokenAddress)
+		// Determine token symbol
+		tokenSymbol := ci.adapter.GetTokenSymbolByAddr(evt.TokenAddress)
 		if evt.IsNative {
 			tokenSymbol = ci.adapter.NativeSymbol()
 		}
 
 		deposit := &domain.Deposit{
 			ID:               uuid.New(),
-			IdempotencyKey:   fmt.Sprintf("%s:%s:%d", ci.cfg.Name, evt.TxHash.Hex(), evt.LogIndex),
+			IdempotencyKey:   fmt.Sprintf("%s:%s:%d", ci.cfg.Name, evt.TxHash, evt.LogIndex),
 			Chain:            ci.cfg.Name,
-			TxHash:           evt.TxHash.Hex(),
+			TxHash:           evt.TxHash,
 			LogIndex:         int(evt.LogIndex),
 			BlockNumber:      int64(evt.BlockNumber),
-			BlockHash:        evt.BlockHash.Hex(),
-			FromAddress:      evt.From.Hex(),
-			ToAddress:        evt.To.Hex(),
-			TokenAddress:     evt.TokenAddress.Hex(),
+			BlockHash:        evt.BlockHash,
+			FromAddress:      evt.From,
+			ToAddress:        evt.To,
+			TokenAddress:     evt.TokenAddress,
 			TokenSymbol:      tokenSymbol,
 			Amount:           evt.Amount,
 			Decimals:         evt.Decimals,
@@ -406,25 +419,25 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 
 		// Check deposit source against blacklist
 		if di.blacklistSvc != nil {
-			blResult, blErr := di.blacklistSvc.CheckDepositSource(ctx, ci.cfg.Name, evt.From.Hex())
+			blResult, blErr := di.blacklistSvc.CheckDepositSource(ctx, ci.cfg.Name, evt.From)
 			if blErr != nil {
-				ci.logger.Warn().Err(blErr).Str("from", evt.From.Hex()).
+				ci.logger.Warn().Err(blErr).Str("from", evt.From).
 					Msg("blacklist check failed for deposit source, recording deposit anyway")
 			} else if blResult.IsBlacklisted {
 				deposit.IsFromBlacklisted = true
 				ci.logger.Warn().
-					Str("from", evt.From.Hex()).
-					Str("to", evt.To.Hex()).
+					Str("from", evt.From).
+					Str("to", evt.To).
 					Strs("sources", blResult.Sources).
-					Str("tx", evt.TxHash.Hex()).
+					Str("tx", evt.TxHash).
 					Msg("deposit from blacklisted address detected — flagged")
 			}
 		}
 
 		if err := di.depositRepo.Upsert(ctx, deposit); err != nil {
 			ci.logger.Error().Err(err).
-				Str("tx", evt.TxHash.Hex()).
-				Str("to", evt.To.Hex()).
+				Str("tx", evt.TxHash).
+				Str("to", evt.To).
 				Msg("failed to record deposit")
 			continue
 		}
@@ -437,9 +450,9 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 		}
 
 		ci.logger.Info().
-			Str("tx", evt.TxHash.Hex()).
-			Str("from", evt.From.Hex()).
-			Str("to", evt.To.Hex()).
+			Str("tx", evt.TxHash).
+			Str("from", evt.From).
+			Str("to", evt.To).
 			Str("token", deposit.TokenSymbol).
 			Str("amount", evt.Amount.String()).
 			Bool("native", evt.IsNative).
@@ -448,11 +461,11 @@ func (di *DepositIndexer) processBlock(ctx context.Context, ci *chainIndexer, bl
 	}
 
 	// Update cursor
-	blockHash, err := ci.adapter.GetBlockHash(ctx, blockNum)
+	blockHash, err := ci.adapter.GetBlockHashHex(ctx, blockNum)
 	if err != nil {
 		return err
 	}
-	return di.indexRepo.UpsertState(ctx, ci.cfg.Name, int64(blockNum), blockHash.Hex())
+	return di.indexRepo.UpsertState(ctx, ci.cfg.Name, int64(blockNum), blockHash)
 }
 
 // updateConfirmations updates confirmation count for pending deposits

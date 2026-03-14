@@ -77,10 +77,12 @@ type TokenConfig struct {
 
 type ChainConfig struct {
 	Name           string        `yaml:"name"`
+	ChainType      string        `yaml:"chain_type"`       // "evm" (default) or "tron"
 	ChainID        int64         `yaml:"chain_id"`
 	RPCURL         string        `yaml:"rpc_url"`
 	RPCURLs        []string      `yaml:"rpc_urls"`         // Failover RPC endpoints
 	WSURL          string        `yaml:"ws_url"`
+	APIKey         string        `yaml:"api_key"`          // API key for providers like TronGrid
 	NativeSymbol   string        `yaml:"native_symbol"`
 	NativeDecimals int           `yaml:"native_decimals"`
 	BlockTime      int           `yaml:"block_time_seconds"`
@@ -323,6 +325,18 @@ func defaultChains() []ChainConfig {
 			TrackedTokens: []TokenConfig{
 				{Address: "0x9702230A8Ea53601f5cD2dc00fDBc13d4dF4A8c7", Symbol: "USDT", Decimals: 6},
 				{Address: "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E", Symbol: "USDC", Decimals: 6},
+			},
+		},
+		{
+			Name: "tron", ChainType: "tron",
+			RPCURL: envStr("TRON_RPC_URL", "https://api.trongrid.io"),
+			APIKey: envStr("TRON_API_KEY", ""),
+			NativeSymbol: "TRX", NativeDecimals: 6,
+			BlockTime: 3, Confirmations: 19,
+			ReorgDepth: 0, FinalityType: "probabilistic",
+			RPCTimeout: 30, RPCRetries: 3, Enabled: true,
+			TrackedTokens: []TokenConfig{
+				{Address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", Symbol: "USDT", Decimals: 6},
 			},
 		},
 	}

@@ -466,3 +466,54 @@ func (a *EVMAdapter) CheckAddressBlacklist(ctx context.Context, contractAddr com
 
 	return new(big.Int).SetBytes(result).Sign() != 0, nil
 }
+
+// Compile-time interface check
+var _ ChainAdapter = (*EVMAdapter)(nil)
+
+// GetBlockHashHex returns the block hash as a hex string (ChainAdapter interface).
+func (a *EVMAdapter) GetBlockHashHex(ctx context.Context, blockNum uint64) (string, error) {
+	h, err := a.GetBlockHash(ctx, blockNum)
+	if err != nil {
+		return "", err
+	}
+	return h.Hex(), nil
+}
+
+// ScanBlockForDeposits wraps ScanBlockForTransfers to return chain-agnostic DepositEvents.
+func (a *EVMAdapter) ScanBlockForDeposits(ctx context.Context, blockNum uint64, watchAddresses map[string]bool) ([]DepositEvent, error) {
+	evmWatch := make(map[common.Address]bool, len(watchAddresses))
+	for addr := range watchAddresses {
+		evmWatch[common.HexToAddress(addr)] = true
+	}
+
+	events, err := a.ScanBlockForTransfers(ctx, blockNum, evmWatch)
+	if err != nil {
+		return nil, err
+	}
+
+	deposits := make([]DepositEvent, len(events))
+	for i, e := range events {
+		tokenAddr := ""
+		if !e.IsNative {
+			tokenAddr = strings.ToLower(e.TokenAddress.Hex())
+		}
+		deposits[i] = DepositEvent{
+			TxHash:       e.TxHash.Hex(),
+			LogIndex:     e.LogIndex,
+			BlockNumber:  e.BlockNumber,
+			BlockHash:    e.BlockHash.Hex(),
+			From:         strings.ToLower(e.From.Hex()),
+			To:           strings.ToLower(e.To.Hex()),
+			TokenAddress: tokenAddr,
+			Amount:       e.Amount,
+			Decimals:     e.Decimals,
+			IsNative:     e.IsNative,
+		}
+	}
+	return deposits, nil
+}
+
+// GetTokenSymbolByAddr returns the symbol for a tracked token by string address.
+func (a *EVMAdapter) GetTokenSymbolByAddr(tokenAddr string) string {
+	return a.GetTokenSymbol(common.HexToAddress(tokenAddr))
+}
